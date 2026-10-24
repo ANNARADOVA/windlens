@@ -1,6 +1,45 @@
 # WindLens handover
 
-**2026-10-24 (latest+14, read first): Follow-up round on the IA rebuild --
+**2026-10-24 (latest+15, read first): Multi-outage detection -- auto-detect
+ALL qualifying gaps per turbine, not just the longest. Anna's explicit ask,
+after the prior round had this scoped out as a stated limitation: "it checks
+for all outages." New `detect_outage_instances()` in `upload_tool.py` returns
+every contiguous NaN run >= `MIN_OUTAGE_RUN_LENGTH` per turbine (not just the
+single longest, which is all the old `detect_outage_window()` ever found);
+`run_pipeline()`'s main loop now iterates over these (turbine, window)
+instances instead of turbine ids, so a turbine with two separate outages in
+its uploaded history produces two separate, independently-reconstructed
+results. The one real correctness risk here -- a turbine's second outage's
+reference selection getting contaminated by its first outage's own gap -- was
+checked carefully and is NOT an issue: each instance's pre-window history is
+still `wind_df[timestamp < THIS instance's window_start]`, and
+`_paired_series()` already `dropna()`s unpaired/NaN rows when fitting, so an
+earlier gap simply contributes zero paired observations there rather than
+corrupting the fit. Verified concretely, not just reasoned about: a two-gap
+synthetic turbine's second instance showed 56 paired pre-window observations
+against the first instance's 20 -- proof the two instances really used
+different, correctly-scoped history, not a shared one. The result/UI side
+needed zero changes: `target_turbine` was never assumed unique across result
+entries, and the multi-target summary built last round already shows window
+dates alongside the turbine id, so two instances of the same turbine already
+render as two distinct, disambiguated rows -- confirmed live with a real
+two-gap upload through the running server. The stale "single longest gap,
+use manual window for a second one" copy from last round (now actively wrong,
+since this fixes exactly that) was replaced with what's still true: a gap
+needs >= 3 consecutive missing readings to auto-detect; shorter dropouts need
+the manual window fields. Also confirmed, unchanged, for Anna: target/
+reference differentiation (the `/preview` role-guess and the result list)
+and "only targets get a loss estimate" were already structurally correct
+before this round and remain so -- nothing needed fixing there, mentioned
+only because she asked to double-check. 193/193 tests pass (2 more: the
+two-separate-gaps-per-turbine case with the paired-observations proof, and
+`detect_target_turbines` still returning one entry per turbine not per
+instance). All three check scripts clean, live-verified in a fresh browser
+tab with zero console errors on both routes, plus a real end-to-end two-gap
+`/run` round-trip rendering as two correctly-disambiguated summary rows. Full
+story in `docs/DECISION_LOG.md`'s matching 2026-10-24 "(latest+10)" entry.**
+
+**2026-10-24 (latest+14): Follow-up round on the IA rebuild --
 further-trimmed other-datasets mention, root README.md rewritten for the real
 submission, a second real correctness gap fixed (power curves in multi-target
 uploads), and multi-target Result UI built. In priority order from the
@@ -1226,16 +1265,16 @@ failure, work-order, or operator label.
 
 - `node --check workspace/app.js`
 - `PYTHONPATH=src /Users/annaradova/.venv/bin/python3 -m unittest discover -s tests -q`
-- Latest result (2026-10-24, after the IA-rebuild follow-up round -- see this
-  file's "(latest+14)" entry at the top): 191 tests, 191 pass.
+- Latest result (2026-10-24, after multi-outage detection -- see this file's
+  "(latest+15)" entry at the top): 193 tests, 193 pass.
   `openpyxl` is now installed, so the prior 10 Excel-connector failures
   (noted here as of 2026-10-23) no longer apply.
 - Browser route check passed for both hash routes (the workspace is now two
   pages, Result and Methodology, not four) -- a fresh browser tab against the
   running server showed zero console errors on both, plus a real end-to-end
-  multi-target `/run` round-trip against BayWa's own real T1/T3 files (each
-  with its own power curve) rendered correctly, each target with its own
-  correct kWh figure (see the "(latest+14)" entry at the top for detail).
+  two-separate-gaps `/run` round-trip rendering as two correctly-disambiguated
+  summary rows for the same turbine (see the "(latest+15)" entry at the top
+  for detail).
 
 ## Next work
 

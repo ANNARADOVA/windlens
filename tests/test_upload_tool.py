@@ -7,6 +7,7 @@ import pandas as pd
 from windlens.upload_tool import (
     _targets_missing_in_window,
     describe_uploaded_files,
+    detect_outage_instances,
     detect_target_turbines,
     run_pipeline,
 )
@@ -96,6 +97,71 @@ class RunPipelineManualWindowRescueTests(unittest.TestCase):
         self.assertIn("TARGET", target_ids)
         target_entry = next(t for t in result["targets"] if t["target_turbine"] == "TARGET")
         self.assertTrue(target_entry["window_auto_detected"])
+
+
+class DetectOutageInstancesTests(unittest.TestCase):
+    def test_one_turbine_with_two_separate_gaps_produces_two_independently_correct_instances(self) -> None:
+        # 2026-10-24: Anna asked for ALL qualifying outages per turbine to be
+        # auto-detected, not just the single longest one. Build a turbine with
+        # two separate NaN runs far apart (hours 20-23 and 60-63 of an 80-hour
+        # series) and confirm each becomes its own instance with its own
+        # correctly-scoped window AND its own correctly-scoped reference
+        # selection -- not contaminated by the other gap. REF has no gaps at
+        # all, so it is the only candidate reference for either instance; its
+        # paired_observations count for each instance proves the pre-window
+        # history used was scoped to THAT instance's own window_start (56
+        # valid rows before the second gap vs. 20 before the first), not
+        # mixed up between the two.
+        rows = []
+        for i in range(80):
+            ts = (pd.Timestamp("2026-01-01T00:00:00Z") + pd.Timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            v = 6.0 + (i % 5) * 0.3
+            first_gap = 20 <= i < 24
+            second_gap = 60 <= i < 64
+            rows.append((ts, "TARGET", None if (first_gap or second_gap) else v))
+            rows.append((ts, "REF", v))
+        wind_df = pd.DataFrame(rows, columns=["timestamp_utc", "turbine_id", "wind_speed_ms"])
+
+        instances = detect_outage_instances(wind_df)
+        target_instances = [i for i in instances if i["target_turbine"] == "TARGET"]
+        self.assertEqual(len(target_instances), 2)
+        self.assertEqual(target_instances[0]["window_start"], "2026-01-01T20:00:00Z")
+        self.assertEqual(target_instances[0]["window_end"], "2026-01-02T00:00:00Z")
+        self.assertEqual(target_instances[1]["window_start"], "2026-01-03T12:00:00Z")
+        self.assertEqual(target_instances[1]["window_end"], "2026-01-03T16:00:00Z")
+
+        result = run_pipeline(wind_df, power_curve_df=None)
+        target_results = [t for t in result["targets"] if t["target_turbine"] == "TARGET"]
+        self.assertEqual(len(target_results), 2)
+
+        by_window_start = {t["outage_window_utc"][0]: t for t in target_results}
+        first = by_window_start["2026-01-01T20:00:00Z"]
+        second = by_window_start["2026-01-03T12:00:00Z"]
+
+        # Each instance reconstructs exactly its own 4-row gap, from REF (the
+        # only candidate), with no errors.
+        self.assertEqual(first["selected_reference"], "REF")
+        self.assertEqual(second["selected_reference"], "REF")
+        self.assertEqual(first["rows_predicted"], 4)
+        self.assertEqual(second["rows_predicted"], 4)
+
+        # The key correctness check: each instance's reference-selection ranking
+        # was fit on ITS OWN pre-window history, not a shared/contaminated one.
+        first_ranking = next(r for r in first["reference_ranking"] if r["turbine_id"] == "REF")
+        second_ranking = next(r for r in second["reference_ranking"] if r["turbine_id"] == "REF")
+        self.assertEqual(first_ranking["paired_observations"], 20)
+        self.assertEqual(second_ranking["paired_observations"], 56)
+
+    def test_detect_target_turbines_still_returns_one_entry_per_turbine_not_per_instance(self) -> None:
+        rows = []
+        for i in range(80):
+            ts = (pd.Timestamp("2026-01-01T00:00:00Z") + pd.Timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            v = 6.0 + (i % 5) * 0.3
+            missing = (20 <= i < 24) or (60 <= i < 64)
+            rows.append((ts, "TARGET", None if missing else v))
+            rows.append((ts, "REF", v))
+        wind_df = pd.DataFrame(rows, columns=["timestamp_utc", "turbine_id", "wind_speed_ms"])
+        self.assertEqual(detect_target_turbines(wind_df), ["TARGET"])
 
 
 class RunPipelineCadenceTests(unittest.TestCase):

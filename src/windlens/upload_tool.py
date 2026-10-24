@@ -117,34 +117,85 @@ def load_power_curve(file_bytes: bytes, filename: str) -> pd.DataFrame:
 MIN_OUTAGE_RUN_LENGTH = 3
 
 
-def _longest_nan_run(series: pd.DataFrame) -> pd.DataFrame | None:
-    """The longest contiguous run of NaN wind_speed_ms rows in a single turbine's
-    time-sorted series, or None if there is no NaN at all."""
+def _nan_runs(series: pd.DataFrame) -> list[pd.DataFrame]:
+    """Every contiguous run of NaN wind_speed_ms rows in a single turbine's
+    time-sorted series, in order, or an empty list if there is no NaN at all.
+    (2026-10-24: split out of the old ``_longest_nan_run`` so a turbine with
+    two or more SEPARATE qualifying outages can be detected as two or more
+    instances, not just its single largest run.)"""
 
     is_nan = series["wind_speed_ms"].isna()
     if not is_nan.any():
-        return None
+        return []
     run_id = (is_nan != is_nan.shift()).cumsum()
-    nan_runs = series[is_nan].groupby(run_id[is_nan])
-    return max((group for _, group in nan_runs), key=len)
+    return [group for _, group in series[is_nan].groupby(run_id[is_nan])]
+
+
+def _longest_nan_run(series: pd.DataFrame) -> pd.DataFrame | None:
+    """The longest contiguous run of NaN wind_speed_ms rows in a single turbine's
+    time-sorted series, or None if there is no NaN at all. Used only where a
+    single per-turbine gap check is enough (the lightweight per-file preview in
+    ``describe_uploaded_files``) -- the real detection/reconstruction path uses
+    ``detect_outage_instances`` so a second, separate gap is not missed."""
+
+    runs = _nan_runs(series)
+    return max(runs, key=len) if runs else None
+
+
+def _window_for_run(series: pd.DataFrame, nan_run: pd.DataFrame) -> tuple[str, str]:
+    """[start, end) timestamp_utc strings for one specific contiguous NaN run,
+    given the full time-sorted series it came from (needed to infer the file's
+    own cadence for the exclusive end bound)."""
+
+    gap_start = nan_run["timestamp_utc"].iloc[0]
+    last_timestamp = series["timestamp_utc"].iloc[
+        series.index[series["timestamp_utc"] == nan_run["timestamp_utc"].iloc[-1]][0]
+    ]
+    # End is exclusive: the next row after the run, or one cadence step past the last
+    # row if the gap runs to the end of the file. Cadence is inferred from the
+    # smallest gap between consecutive timestamps in the file.
+    cadence_candidates = pd.to_datetime(series["timestamp_utc"]).diff().dropna()
+    cadence = cadence_candidates[cadence_candidates > pd.Timedelta(0)].min()
+    gap_end = (pd.Timestamp(last_timestamp) + cadence).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return gap_start, gap_end
+
+
+def detect_outage_instances(wind_df: pd.DataFrame) -> list[dict[str, str]]:
+    """Every qualifying outage INSTANCE across all uploaded turbines -- not just
+    one per turbine. A turbine with two separate, independent NaN runs, each
+    reaching MIN_OUTAGE_RUN_LENGTH rows, produces two separate instances here,
+    each with its own [window_start, window_end). (2026-10-24: previously only
+    the single LONGEST run per turbine was auto-detected; a second, distinct
+    outage on the same turbine was silently invisible to auto-detection.)
+
+    Each dict: {"target_turbine": ..., "window_start": ..., "window_end": ...}.
+    """
+
+    instances: list[dict[str, str]] = []
+    for turbine_id, group in wind_df.sort_values("timestamp_utc").groupby("turbine_id"):
+        series = group[["timestamp_utc", "wind_speed_ms"]].reset_index(drop=True)
+        for run in _nan_runs(series):
+            if len(run) >= MIN_OUTAGE_RUN_LENGTH:
+                window_start, window_end = _window_for_run(series, run)
+                instances.append(
+                    {"target_turbine": turbine_id, "window_start": window_start, "window_end": window_end}
+                )
+    return sorted(instances, key=lambda instance: (instance["target_turbine"], instance["window_start"]))
 
 
 def detect_target_turbines(wind_df: pd.DataFrame) -> list[str]:
-    """Every turbine_id whose longest contiguous NaN run reaches
-    MIN_OUTAGE_RUN_LENGTH rows -- not just any turbine with any NaN at all (see
-    MIN_OUTAGE_RUN_LENGTH)."""
+    """Every distinct turbine_id with at least one qualifying outage instance
+    (see ``detect_outage_instances``) -- not just any turbine with any NaN at
+    all (see MIN_OUTAGE_RUN_LENGTH)."""
 
-    targets = []
-    for turbine_id, group in wind_df.sort_values("timestamp_utc").groupby("turbine_id"):
-        longest_run = _longest_nan_run(group[["timestamp_utc", "wind_speed_ms"]])
-        if longest_run is not None and len(longest_run) >= MIN_OUTAGE_RUN_LENGTH:
-            targets.append(turbine_id)
-    return sorted(targets)
+    return sorted({instance["target_turbine"] for instance in detect_outage_instances(wind_df)})
 
 
 def detect_outage_window(wind_df: pd.DataFrame, target_turbine: str) -> tuple[str, str]:
     """The target turbine's single largest contiguous run of NaN wind_speed_ms,
-    as [start, end) timestamp_utc strings."""
+    as [start, end) timestamp_utc strings. Kept for callers that only care about
+    one window per turbine; ``run_pipeline``'s own auto-detection now uses
+    ``detect_outage_instances`` instead, to catch a second, separate gap too."""
 
     series = (
         wind_df[wind_df["turbine_id"] == target_turbine]
@@ -154,17 +205,7 @@ def detect_outage_window(wind_df: pd.DataFrame, target_turbine: str) -> tuple[st
     longest_run = _longest_nan_run(series)
     if longest_run is None:
         raise ValueError(f"{target_turbine} has no NaN wind-speed gap to auto-detect")
-    gap_start = longest_run["timestamp_utc"].iloc[0]
-    last_timestamp = series["timestamp_utc"].iloc[
-        series.index[series["timestamp_utc"] == longest_run["timestamp_utc"].iloc[-1]][0]
-    ]
-    # End is exclusive: the next row after the run, or one cadence step past the last
-    # row if the gap runs to the end of the file. Cadence is inferred from the
-    # smallest gap between consecutive timestamps in the file.
-    cadence_candidates = pd.to_datetime(series["timestamp_utc"]).diff().dropna()
-    cadence = cadence_candidates[cadence_candidates > pd.Timedelta(0)].min()
-    gap_end = (pd.Timestamp(last_timestamp) + cadence).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return gap_start, gap_end
+    return _window_for_run(series, longest_run)
 
 
 def _candidate_references(wind_df: pd.DataFrame, target_turbine: str, detected_targets: list[str]) -> list[str]:
@@ -347,9 +388,11 @@ def run_pipeline(
     manual_end: str | None = None,
     power_curve_items: list[tuple[bytes, str]] | None = None,
 ) -> dict[str, Any]:
-    """Run the reconstruction for every auto-detected target turbine (or, when
-    ``manual_start``/``manual_end`` are given, for every turbine that has no reading
-    at all inside that window) and return per-target predictions.
+    """Run the reconstruction for every auto-detected outage INSTANCE (a turbine
+    with two separate, independent gaps in its uploaded history gets two entries
+    here -- see ``detect_outage_instances``) -- or, when ``manual_start``/
+    ``manual_end`` are given, for every turbine that has no reading at all inside
+    that window -- and return per-instance predictions.
 
     ``power_curve_items``, when given (a whole-farm-down upload with one power-curve
     file per target, matched by filename via ``_find_power_curve_for_target`` --
@@ -383,24 +426,40 @@ def run_pipeline(
                 f"manual window {manual_start} to {manual_end} -- nothing to "
                 "reconstruct for that window."
             )
+        instances = [
+            {"target_turbine": turbine_id, "window_start": manual_start, "window_end": manual_end}
+            for turbine_id in targets
+        ]
     else:
-        targets = detect_target_turbines(wind_df)
-        if not targets:
+        # Every qualifying outage INSTANCE, not one window per turbine -- a turbine
+        # with two separate, independent gaps in its uploaded history produces two
+        # entries here (2026-10-24). ``targets`` (the distinct turbine ids) is still
+        # needed below to exclude every instance's own turbine from being used as
+        # someone ELSE's reference, regardless of how many instances it has.
+        instances = detect_outage_instances(wind_df)
+        if not instances:
             raise ValueError(
                 "No NaN wind-speed gap found on any uploaded turbine, and no manual "
                 "outage window was given -- nothing to reconstruct"
             )
+        targets = sorted({instance["target_turbine"] for instance in instances})
 
     results = []
-    for target_turbine in targets:
+    for instance in instances:
+        target_turbine = instance["target_turbine"]
         try:
-            window_start, window_end = (
-                (manual_start, manual_end)
-                if manual_start and manual_end
-                else detect_outage_window(wind_df, target_turbine)
-            )
+            window_start, window_end = instance["window_start"], instance["window_end"]
             window_auto_detected = not (manual_start and manual_end)
 
+            # pre_window below is this INSTANCE's own window_start -- for a turbine's
+            # second outage, that naturally includes the turbine's first outage's own
+            # NaN rows further back in time, but _paired_series() already dropna()s
+            # unpaired/NaN rows when fitting, so the first gap simply contributes no
+            # paired observations there rather than contaminating the fit; reference
+            # selection and coverage are both computed against THIS instance's window
+            # only (select_reference_turbine's window_start/window_end below, and the
+            # expected_rows/domain_check calculations further down, all use these
+            # instance-local window_start/window_end, never detect_outage_window()).
             candidates = _candidate_references(wind_df, target_turbine, targets)
             pre_window = wind_df[wind_df["timestamp_utc"] < window_start]
             selection = select_reference_turbine(

@@ -3904,3 +3904,104 @@ immediately after verification, confirmed reverted by a 404 on
 file-picker limitation as every prior round: the actual click-to-select step
 was not driven; the fetch-and-render path downstream of it was, using the
 real server's real response to real files.
+
+---
+
+**2026-10-24 (latest+10): Multi-outage detection -- auto-detect ALL
+qualifying gaps per turbine. DECISION.**
+
+**Why this changed from "known limitation" to "build it."** The prior round
+scoped this out with honest UI copy: auto-detection only finds a turbine's
+single LONGEST NaN run; a second, separate outage needed the manual-window
+fields, run a second time. That was a reasonable scope call under deadline
+pressure, documented plainly rather than hidden. Anna reviewed it and asked
+for the real feature: "it checks for all outages." Built it.
+
+**What changed, precisely.** `_longest_nan_run()` (which only ever found the
+single biggest contiguous NaN run per turbine) is now built on top of a new
+`_nan_runs()` that returns EVERY contiguous run. A new `detect_outage_instances()`
+walks every uploaded turbine and returns one instance dict per qualifying run
+(same `MIN_OUTAGE_RUN_LENGTH` threshold as always, now applied per-run instead
+of only to the longest), each with its own `[window_start, window_end)`. The
+window-boundary math itself (finding the exclusive end from the file's own
+inferred cadence) was extracted into `_window_for_run()` so both the old
+single-window path (`detect_outage_window`, kept for any caller that only
+wants one window) and the new multi-instance path share the identical,
+already-tested logic rather than duplicating it. `run_pipeline()`'s main loop
+now iterates `for instance in instances` (built from `detect_outage_instances()`
+on the auto-detect path, or one instance per turbine with the same manual
+window on the manual-override path) instead of `for target_turbine in targets`
+-- `targets` (the distinct turbine ids) is still computed and still used to
+exclude every target's own turbine from being used as anyone ELSE's
+reference, regardless of how many instances it has.
+
+**The one real correctness risk, checked carefully, not just asserted.** A
+turbine's SECOND outage instance's pre-window history is
+`wind_df[timestamp < window_start]` using that instance's OWN window_start --
+which, for a turbine with an earlier first outage, naturally still includes
+the rows spanning that first outage (now in the past relative to the second
+window). Is that contamination? No: `_paired_series()` (the shared helper
+behind both reference-ranking and reconstruction) already `.dropna()`s any
+row where either turbine's wind speed is NaN before fitting -- so the first
+outage's own NaN rows on the target turbine simply contribute zero paired
+observations to the second instance's fit, exactly as any OTHER incidental
+NaN gap already would have. Verified concretely rather than just reasoned
+about: built a synthetic turbine with two separate 4-hour gaps (hours 20-23
+and 60-63 of an 80-hour series) against a gap-free reference, and asserted
+the exact `paired_observations` count each instance's reference-selection
+ranking used -- 20 for the first instance (hours 0-19), 56 for the second
+(hours 0-59 minus the first gap's 4 NaN rows) -- proving the two instances
+genuinely used different, correctly-scoped pre-window history, not a shared
+or stale one. This was the one part of this change actually worth worrying
+about, per the coordinator's own flag, and it checks out.
+
+**The result/UI side needed zero changes, confirmed rather than assumed.**
+`target_turbine` was never used as a unique key anywhere in the result
+pipeline or in `app.js` (checked: no dict keyed by it, `results.append()` is
+a plain list). The multi-target summary UI built last round already shows
+each row's own outage-window dates alongside the turbine id specifically
+because that round anticipated this exact case -- so two instances of the
+same turbine id now render as two distinct, disambiguated rows automatically.
+Confirmed live, not just by code reading: a real two-gap synthetic upload
+through the running server rendered as two "TARGET" summary rows with
+different date ranges, each clickable and switching the detail view
+correctly.
+
+**Stale copy fixed, not left behind.** Last round's "we only detect the
+single longest gap, use manual window for a second one" note in the upload
+form's format-details disclosure is now actively wrong -- this round fixes
+exactly that limitation. Replaced with what's still true: a gap needs at
+least `MIN_OUTAGE_RUN_LENGTH` (3) consecutive missing readings to
+auto-detect at all; a shorter dropout still needs the manual window fields.
+Same honesty standard as everything else on this page -- state the real
+remaining limitation plainly, don't leave a now-false one in place.
+
+**Two confirmations for Anna (no changes needed, already correct).** (1)
+Target-vs-reference differentiation: `/preview`'s per-file `role_guess`
+already distinguishes "target (has a data gap)" from "reference candidate,"
+and the result list only ever contains entries built from
+`detect_outage_instances`/`_targets_missing_in_window`, both of which only
+ever name genuinely-gapped turbines -- a reference turbine structurally
+cannot appear as its own result row. (2) Only targets get a loss estimate:
+`results.append(entry)` happens only inside the per-instance loop, which by
+construction only ever iterates detected outage instances. Both were already
+true before this round and remain true after it; verified by re-reading the
+relevant code paths rather than re-derived from scratch, since nothing here
+changed.
+
+**Verification:** 193/193 tests pass (2 new: the two-separate-gaps case with
+the paired-observations contamination proof above, and a check that
+`detect_target_turbines` still returns one entry per turbine, not one per
+instance, so nothing downstream that assumes turbine-level target membership
+broke). `node --check workspace/app.js` clean. All three check scripts
+clean. Server restarted to pick up the backend change; verified twice: first
+via direct curl against the real running server (20 vs 56 paired
+observations, 4 rows predicted per instance, correct window boundaries for
+both), then live in a FRESH browser tab (not a reused one with stale console
+history) with zero console errors on both `#overview` and `#method`, plus a
+real end-to-end `/run` round-trip -- constructed client-side as actual CSV
+`Blob`s posted via `FormData`, exactly as the real upload form does -- against
+the same two-gap synthetic file, rendering as two distinct, correctly-labelled
+summary rows with click-to-switch working. Same file-picker limitation as
+every round: the click-to-select step itself was not driven, only what
+happens after a file selection reaches the server.

@@ -26,7 +26,7 @@ The graded record uses BayWa's own real challenge dataset (`data_hackathon_baywa
 
 ## Current verified state
 
-As of October 24, 2026, the full test suite is **191 tests, 191 pass**. Run with:
+As of October 24, 2026, the full test suite is **193 tests, 193 pass**. Run with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -q
@@ -54,7 +54,7 @@ The only third-party dependencies are pandas and numpy (plus openpyxl, for readi
 ## Repository layout
 
 - `src/windlens/` — the reconstruction, uncertainty, and review-gate pipeline, plus the upload tool and local server.
-- `tests/` — the test suite (191 tests, 191 pass; see "Current verified state" above).
+- `tests/` — the test suite (193 tests, 193 pass; see "Current verified state" above).
 - `data/` — raw source archives (including BayWa's real challenge data) and derived canonical datasets, with provenance manifests.
 - `workspace/` — the dependency-free evidence-first analyst workspace: two pages, **Result** (the live T3 record, with an upload form to run your own data) and **Methodology** (validation detail, the editable price, and report actions).
 - `docs/` — `DECISION_LOG.md` (the full, append-only history of decisions and results, including unsuccessful attempts and earlier proxy-farm validation work), and `HANDOVER.md` (the concise cross-session summary).

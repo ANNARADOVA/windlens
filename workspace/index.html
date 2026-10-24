@@ -32,7 +32,7 @@
           <p class="plain-note">This runs a live, separate calculation on whatever you upload — it replaces the result view below with your own run. The real BayWa T3 submission underneath is never changed by this.</p>
           <details class="upload-format-details"><summary>File format details</summary>
             <p class="plain-note">Wind-data columns are either <code>timestamp_utc,turbine_id,wind_speed_ms</code> (canonical) or <code>timestamp,turbine_name,wind_speed</code> (BayWa raw); power-curve columns are <code>wind_speed,power</code> or <code>bin_center_ms,mean_power_kw</code>.</p>
-            <p class="plain-note">We auto-detect the single largest gap per turbine. If a turbine has more than one separate outage in its uploaded history, only the longer one is found automatically — use the manual window fields below to reconstruct the other period, one run at a time.</p>
+            <p class="plain-note">We auto-detect every qualifying gap on every uploaded turbine — including a turbine with two or more separate outage periods in its history, which each get their own result below. A gap needs at least 3 consecutive missing readings to auto-detect (shorter dropouts are common on healthy turbines too and aren't treated as outages); for a dropout shorter than that, use the manual window fields below instead.</p>
           </details>
           <form id="upload-form" class="upload-form">
             <label>All files together (required — select 2 or more)<input type="file" id="upload-files" name="files" accept=".csv,.xlsx,.xls" multiple required></label>
