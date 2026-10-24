@@ -25,16 +25,20 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import traceback
+from typing import Any
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from windlens.energy_price_lookup import PriceDataUnavailable, get_price_for_outage_window
 from windlens.insurance_report import generate as generate_insurance_report
+from windlens.insurance_report import generate_for_live_target as generate_insurance_report_for_live_target
 from windlens.upload_tool import (
-    classify_file_kind,
+    concat_wind_data_frames,
     describe_uploaded_files,
-    load_wind_data_files,
+    read_and_classify,
     run_pipeline,
 )
 
@@ -110,6 +114,9 @@ class Handler(BaseHTTPRequestHandler):
         if split.path == "/insurance-report":
             self._handle_insurance_report(parse_qs(split.query))
             return
+        if split.path == "/energy-price":
+            self._handle_energy_price(parse_qs(split.query))
+            return
 
         # Strip a cache-busting query string (e.g. "/app.js?v=20261023c") -- the
         # workspace's own index.html references its static files that way.
@@ -139,25 +146,105 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    @staticmethod
+    def _price_override_from_query(query: dict[str, list[str]]) -> dict[str, Any] | None:
+        # 2026-10-24 correctness fix: lets the report use the SAME price the
+        # Analysis page is currently showing for this result (real reBAP or
+        # the illustrative fallback) instead of always re-loading the fixed
+        # demo profile from disk -- see profile_from_price_override().
+        raw_price = (query.get("price_eur_per_mwh") or [""])[0].strip()
+        if not raw_price:
+            return None
+        try:
+            price = float(raw_price)
+        except ValueError:
+            return None
+        source_label = (query.get("price_source") or ["Page-shown price"])[0].strip() or "Page-shown price"
+        is_real = (query.get("price_is_real") or [""])[0].strip().lower() == "true"
+        return {"price_eur_per_mwh": price, "source_label": source_label, "is_real_price": is_real}
+
     def _handle_insurance_report(self, query: dict[str, list[str]]) -> None:
         target = (query.get("target") or [""])[0].strip().upper()
         if not target:
             self._send_json_error(400, "Missing required ?target=<turbine id> (e.g. ?target=T3)")
             return
         try:
-            result = generate_insurance_report(target)
+            result = generate_insurance_report(target, price_override=self._price_override_from_query(query))
         except Exception as exc:  # unknown target id, missing assessment file, etc.
             traceback.print_exc()
             self._send_json_error(400, f"{type(exc).__name__}: {exc}")
             return
         self._send_json(200, result)
 
+    def _handle_energy_price(self, query: dict[str, list[str]]) -> None:
+        # 2026-10-24: the real netztransparenz.de reBAP (German balancing-energy
+        # settlement price) for whichever result's own outage window the Analysis
+        # page is showing -- never fabricated, raises PriceDataUnavailable (caught
+        # here and surfaced as a plain error) for any month with no downloaded
+        # source file, so the frontend can fall back to the illustrative price.
+        window_start = (query.get("window_start") or [""])[0].strip()
+        window_end = (query.get("window_end") or [""])[0].strip()
+        if not window_start or not window_end:
+            self._send_json_error(400, "Missing required ?window_start=YYYY-MM-DD&window_end=YYYY-MM-DD")
+            return
+        try:
+            result = get_price_for_outage_window(window_start, window_end)
+        except PriceDataUnavailable as exc:
+            self._send_json_error(400, str(exc))
+            return
+        except Exception as exc:  # malformed date, etc.
+            traceback.print_exc()
+            self._send_json_error(400, f"{type(exc).__name__}: {exc}")
+            return
+        self._send_json(200, result)
+
+    def _handle_insurance_report_for_upload(self, query: dict[str, list[str]]) -> None:
+        # 2026-10-24 correctness fix: the GET /insurance-report endpoint above
+        # only ever reads the fixed official assessment file by turbine id --
+        # it has no way to build a report from a live /run upload result. This
+        # endpoint takes that exact target-entry JSON (one entry from /run's
+        # "targets" array) directly in the POST body instead of looking
+        # anything up by id, so the report always matches whatever the user
+        # is actually looking at, including a turbine id outside T1/T2/T3.
+        length = int(self.headers.get("Content-Length", "0"))
+        if length == 0:
+            self._send_json_error(400, "Missing request body -- expected one target entry from /run's response")
+            return
+        body = self.rfile.read(length)
+        try:
+            target_entry = json.loads(body)
+        except json.JSONDecodeError as exc:
+            self._send_json_error(400, f"Invalid JSON body: {exc}")
+            return
+        if not isinstance(target_entry, dict) or "target_turbine" not in target_entry or "selected_reference" not in target_entry:
+            self._send_json_error(
+                400,
+                "Request body must be one target entry from /run's \"targets\" array "
+                "(needs at least target_turbine, selected_reference, outage_window_utc).",
+            )
+            return
+        try:
+            result = generate_insurance_report_for_live_target(
+                target_entry, price_override=self._price_override_from_query(query)
+            )
+        except Exception as exc:  # malformed entry, missing commercial profile, etc.
+            traceback.print_exc()
+            self._send_json_error(400, f"{type(exc).__name__}: {exc}")
+            return
+        self._send_json(200, result)
+
     def do_POST(self) -> None:
+        split = urlsplit(self.path)
+        if split.path == "/insurance-report-for-upload":
+            self._handle_insurance_report_for_upload(parse_qs(split.query))
+            return
+
         if self.path not in ("/run", "/preview"):
             self.send_response(404)
             self.end_headers()
             return
 
+        _t_start = time.time()
         content_type = self.headers.get("Content-Type", "")
         if "boundary=" not in content_type:
             self._send_json_error(400, "Expected multipart/form-data with a boundary")
@@ -165,10 +252,17 @@ class Handler(BaseHTTPRequestHandler):
         boundary = content_type.split("boundary=")[-1].strip().encode("utf-8")
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        _t_read_body = time.time()
         parts = _parse_multipart(body, boundary)
+        _t_parse_multipart = time.time()
+        print(
+            f"[PERF] {self.path} read_body={_t_read_body - _t_start:.3f}s "
+            f"parse_multipart={_t_parse_multipart - _t_read_body:.3f}s (body {length} bytes)",
+            file=sys.stderr,
+        )
 
         # Every uploaded data file -- wind-data and power-curve alike -- comes
-        # in under one field name ("files"); classify_file_kind() sorts them by
+        # in under one field name ("files"); read_and_classify() sorts them by
         # their own column headers so the user never has to know in advance
         # which of two separate boxes each file belongs in. Shared between /run
         # and /preview (2026-10-24, Category 8) so the pre-run confirmation
@@ -179,17 +273,28 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            _t_classify_start = time.time()
+            # Each uploaded file is parsed with pandas exactly ONCE here, via
+            # read_and_classify() (2026-10-24 perf fix -- classify_file_kind()
+            # followed by load_wind_data_files() used to parse the same xlsx
+            # bytes twice per file; see read_and_classify()'s docstring for the
+            # measured cost). wind_data_items/power_curve_items (bytes) are kept
+            # alongside purely for /preview's describe_uploaded_files(), which
+            # still re-parses -- that path is not the one that was measured slow.
             wind_data_items: list[tuple[bytes, str]] = []
+            wind_data_frames: list[Any] = []
             power_curve_items: list[tuple[bytes, str]] = []
             unknown_names: list[str] = []
             for p in uploaded_parts:
-                kind = classify_file_kind(p["data"], p["filename"])
+                kind, parsed = read_and_classify(p["data"], p["filename"])
                 if kind == "wind_data":
                     wind_data_items.append((p["data"], p["filename"]))
+                    wind_data_frames.append(parsed)
                 elif kind == "power_curve":
                     power_curve_items.append((p["data"], p["filename"]))
                 else:
                     unknown_names.append(p["filename"])
+            print(f"[PERF] read_and_classify x{len(uploaded_parts)} = {time.time() - _t_classify_start:.3f}s", file=sys.stderr)
             if unknown_names:
                 self._send_json_error(
                     400,
@@ -208,7 +313,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"files": describe_uploaded_files(wind_data_items, power_curve_items)})
                 return
 
-            wind_df = load_wind_data_files(wind_data_items)
+            _t_load_start = time.time()
+            wind_df = concat_wind_data_frames(wind_data_frames)
+            print(f"[PERF] concat_wind_data_frames = {time.time() - _t_load_start:.3f}s ({len(wind_df)} rows)", file=sys.stderr)
 
             def _text_field(name: str) -> str | None:
                 field_list = parts.get(name)
@@ -219,6 +326,7 @@ class Handler(BaseHTTPRequestHandler):
             manual_start = _text_field("manual_start")
             manual_end = _text_field("manual_end")
 
+            _t_pipeline_start = time.time()
             result = run_pipeline(
                 wind_df,
                 manual_start=manual_start,
@@ -227,6 +335,12 @@ class Handler(BaseHTTPRequestHandler):
                 # correctness fix) -- never just the first uploaded curve applied to
                 # every target in a whole-farm-down upload.
                 power_curve_items=power_curve_items,
+            )
+            _t_pipeline_end = time.time()
+            print(
+                f"[PERF] run_pipeline = {_t_pipeline_end - _t_pipeline_start:.3f}s | "
+                f"TOTAL {self.path} = {_t_pipeline_end - _t_start:.3f}s",
+                file=sys.stderr,
             )
         except Exception as exc:  # local tool: surface the error to the caller, not a 500 page
             traceback.print_exc()

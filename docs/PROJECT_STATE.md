@@ -1,8 +1,64 @@
-# WindLens project state and handoff
+# WindLens project state — current snapshot
 
-**Last updated:** 2026-10-20  
-**Purpose:** persistent handoff for the next agent or session. Update this file
-whenever implementation, assumptions, validation results, or priorities change.
+**Last updated:** 2026-10-24.
+**This is a concise current-state snapshot, not the project history.** For
+the full chronological record (including everything superseded below), see
+`docs/DECISION_LOG.md`. For the current product specification, see
+`docs/PRODUCT_BRIEF.md` — that file, not this one, is the detailed current
+spec; this file is a quick status check.
+
+## Current product status
+
+WindLens reconstructs a wind turbine's lost energy production during an
+outage, using the real BayWa r.e. "Energy & AI" hackathon dataset. The
+graded submission is a hidden-window prediction for target turbine T3
+(112,411 kWh, 2026-09-01 to 2026-09-04), reconstructed from reference
+turbine O1, with a separate self-validation on a different, known window
+(T3 5.19%, T1 39.36% — an investigated outlier, T2 2.73% energy error).
+
+## Current active dataset
+
+The real BayWa challenge dataset. Targets: T1, T2, T3. Reference candidates:
+O1, O2, H1–H5. See `docs/DATA_PROVENANCE.md` for full provenance and
+`docs/PRODUCT_BRIEF.md` for the product-level summary. Kelmarsh, Hill of
+Towie, Penmanshiel, and EDP Portugal are historical/research datasets only —
+see `docs/DATA_PROVENANCE.md`'s "Historical/research datasets" section.
+
+## Current UI
+
+Two pages served by `windlens.baywa_tool_server`: the analysis/result page
+(upload, live result, outage-overlay chart) and the methodology page
+(validation detail, editable price, report actions). Exact routes and labels
+are defined in `workspace/index.html`/`workspace/app.js` — that code is
+authoritative over this file if they ever diverge.
+
+## Current verified test count
+
+199 tests, 199 pass, as of this writing (`PYTHONPATH=src python3 -m
+unittest discover -s tests -q`). This number moves as work continues — treat
+the live test-run output as authoritative over this paragraph.
+
+## Current known limitations
+
+See `docs/PRODUCT_BRIEF.md`'s "Current limitations and non-claims" section —
+not duplicated here to avoid the two going out of sync.
+
+## Current next steps
+
+See whatever dispatch/task is currently in flight for this session — this
+file does not track a live task list. For the product's own longer-term
+"future opportunities" (not current-sprint next steps), see
+`docs/PRODUCT_BRIEF.md` and the README's "Future opportunities" section.
+
+---
+
+## Historical record (superseded — kept for context, not current)
+
+Everything below this line describes an earlier state of the project
+(Kelmarsh-first, before the real BayWa data arrived, with a different UI
+route structure and test-count history). It is kept as a historical record,
+not current guidance — see `docs/DECISION_LOG.md` for the full chronological
+detail these paragraphs summarize.
 
 ## Product intent
 

@@ -1,6 +1,309 @@
 # WindLens handover
 
-**2026-10-24 (latest+15, read first): Multi-outage detection -- auto-detect
+**2026-10-24 (latest+23, read first): Live uploads now get a REAL wind/power
+error figure.** High priority, Anna directly: official record showed
+real wind-speed/power RMSE, live uploads didn't. Added
+`_self_validate()`/`_find_clean_validation_window()` in `upload_tool.py` --
+finds one clean, same-duration window elsewhere in the SAME upload,
+reconstructs it the same way, compares to real data. Single bounded run,
+not a loop (the earlier full-period backtest attempt was reverted for a 2x
+perf hit; this costs ~0.1-0.2s/target, measured). Wired into `app.js`'s
+upload branch. New test `SelfValidationTests`. NOT done: showing the
+reconstructed line across the full chart, not just the outage band --
+judged too risky to rush with ~35 min left when asked; flagged honestly.
+Also a large text-trim batch this round (see DECISION_LOG for the full
+list) -- review status, chart legend wording, Energy Loss panel now shows
+the number itself, Limitations precision/additions, Methodology next-steps
+cleanup, literal Yes/No answers removed from the evidence-checks list.
+217/217 tests, checks clean, verified live on a fresh tab. Cache-bust
+`20261024x`.
+
+**2026-10-24 (latest+22, read first): Methodology page restructured (general
+content first, T3 evidence last); validation steps now Q&A; final
+text-minimalism pass.** Second direct feedback round from Anna, framed as
+the final content pass ("as little text as possible, no emotional text"):
+- **Methodology page physically reordered.** General content (Method
+  summary, Reconstruction/Energy formulas, Limitations, Other methods,
+  Next steps) now all comes first; T3-specific evidence (validation gates,
+  self-validation chart, T1/T2/T3 comparison) now comes last under one
+  explicit "Evidence for this submission (real BayWa T3 record)" divider.
+  This is the fix for Anna's repeated "why does methodology still have a
+  T3 graph" — the content was there before too, just confusingly
+  interleaved with the general method explanation. No element ids changed.
+- **Validation steps are now Q&A**: "Did the dataset parse cleanly? Yes —
+  ..." etc. `app.js`'s gate renderer prepends Yes/No/Not yet from
+  `g.state`; gate labels in assessment-data.js rewritten as questions.
+- **Chart-toggle hint added**: "Click a line below to show or hide it."
+  directly above the legend — the pill-button redesign from the last round
+  still wasn't intuitive enough on its own.
+- **Formulas cut ~50%** (the OLS-vs-variance-ratio justification was too
+  technical for the stated "zero data-science background" audience).
+- **Friend's-model entry reworded** to lead with complexity, not just speed.
+- **Power-column limitation clarified** — directly answers "can't we just
+  calculate power from wind speed?" (yes, that's exactly what happens; the
+  caveat is that a curve-derived value still isn't an independent/real
+  power *measurement*, since actual output can differ from the curve).
+- **kWh/EUR ranges explicitly labeled "Interval:"** and trimmed to minimum
+  text (Anna: "say what it is (# interval)").
+- Reworded "How this works, in plain terms" → "Method summary" (Anna:
+  "no phrasing like this pls").
+
+Verification: 216/216 tests (pure copy/structure, no Python logic touched),
+all 3 check scripts clean, `node --check` clean, live-verified on both
+routes after a hard reload, zero console errors. Cache-bust at `20261024w`.
+
+**2026-10-24 (latest+21): Anna's direct feedback round — chart
+toggle affordance, custom tooltip, 12px chart text, wording sweep, band %
+now shown.** Anna messaged directly with specific live-page complaints after
+testing it herself:
+- **Chart-line toggles "didn't work" for her** — mechanism was actually fine
+  (verified with a real mouse click, not just programmatic); the legend
+  items just looked like plain text, not buttons. Redesigned into visible
+  pill/chip buttons (`.legend-toggle` in styles.css) with border, hover
+  state, strikethrough-when-off.
+- **Reference tooltip "doesn't show how it was selected"** — native `title`
+  tooltips are slow/inconsistent across browsers. Switched to a custom CSS
+  `::after` popover off `data-tooltip` (styled to match the app, shows
+  instantly on hover). `app.js` now sets `.dataset.tooltip`, not `.title`.
+- **"06 Sept 2026" chart text too small** — `.chart-grid text`/`.axis-label`
+  were 11px, bumped to 12px (the only live sub-12px text on the page).
+- **Confidence-band percentage was never shown** — the kWh/EUR ranges are a
+  ±39% bracket (worst of the n=3 real targets' shown-window error, applied
+  symmetrically). Both ranges now read "(±39%, the worst of the n=3 real
+  targets)" instead of bare numbers.
+- **Wording sweep**: AI-sounding topbar intro, "uncertainty range not
+  guaranteed", "Live run (ungraded)", "Outage window in context", "For an
+  insurer, grounded entirely in these numbers", "broken turbine(s)" (now
+  "turbine(s) with an outage" / "affected turbine") — all reworded, all
+  verified live.
+- **reBAP panel**: "reBAP (real price)" / "n=2,880 points" jargon reworded
+  to plain language; the long inline source+URL line shortened to "Unit:
+  EUR/MWh · Source: [clickable link]".
+- **"Checking selected files…" loading state** now has a visible CSS
+  spinner instead of bare text.
+- **Insurance report confirmed real, not hardcoded** — checked
+  `insurance_report.py` for any literal demo numbers, found none; it's
+  always built from the actual assessment/upload data.
+
+Verification: 216/216 tests, all 3 check scripts clean, `node --check`
+clean, live-verified with a real mouse click (not just programmatic) on the
+redesigned toggle buttons and the new tooltip. Cache-bust at `20261024u`.
+
+**2026-10-24 (latest+20): Methodology rewrite shipped; honest
+not-applicable framing shipped; full-period self-validation backtest built,
+tested, then DELIBERATELY REVERTED (perf regression).**
+1. **Methodology page**: new "How this works, in plain terms" section, now
+   the FIRST content block on the page -- the 8-step plain-language
+   explanation Anna asked for (problem -> trick -> find stand-in -> translate
+   -> turn into electricity -> add up -> check trustworthiness -> optional
+   money), zero turbine-specific numbers. "Other methods we considered" now
+   includes the friend's ML ensemble honestly (more accurate on 1 of 3
+   targets, comparable on the other 2, but 30-90x slower -- 26.88s to fit one
+   target once vs. this method's ~4s for a full multi-target run).
+2. **Not-applicable framing**: a live upload's wind-speed-error/energy-
+   deviation fields now cross-reference the official record's real n=3
+   shown-window figures instead of a bare "Not applicable" (`app.js::
+   selfValidationContext()`, no new backend call). Power deviation stays
+   plain "Not applicable" -- no per-target power RMSE data exists to ground
+   a number there honestly.
+3. **Full-period self-validation backtest -- BUILT, TESTED, then REVERTED.**
+   `backtest_self_validation()` in `reconstruct.py` worked correctly (3/3
+   tests passed first try) but, measured against the real whole-farm
+   upload, roughly DOUBLED `/run`'s response time (13-file: 10.65s -> 20.2s)
+   -- directly undoing this session's #1 priority fix from under an hour
+   earlier. Per explicit instruction ("abandon it and revert... a working
+   n=3 figure beats a broken or untested full-period one"), fully removed:
+   the function, its 3 tests, and the `run_pipeline()` wiring. **If anyone
+   picks this idea back up**, the correctness logic is sound (see the
+   reverted diff in git history / DECISION_LOG for the exact approach) --
+   the fix needed is making it NOT run synchronously per-target inside
+   `/run`'s request path (e.g. precompute once and cache, or move off the
+   hot path entirely), not the backtest math itself.
+
+Verification: 216/216 tests (the correct final count, after the revert).
+All 3 check scripts clean. `node --check` clean. Live-verified in a fresh
+tab, zero console errors. `/run` re-measured after the revert to confirm the
+earlier perf fix is fully intact (10.0s on the real 13-file whole-farm
+upload, matching the already-shipped fixed baseline). Cache-bust at
+`20261024s`.
+
+**2026-10-24 (latest+19): /run perf regression fixed, overlay
+chart lines independently toggleable, ruthless minimalism pass across both
+pages.** Three things, in the order Anna/the coordinator actually prioritized
+them:
+1. **`/run` was really slow, and it was a real bug, not environmental.**
+   Every uploaded file was parsed with pandas/openpyxl TWICE (once to
+   classify it, once to normalize it) -- added `read_and_classify()` in
+   `upload_tool.py` to parse each file exactly once; server's `do_POST` uses
+   it instead of classify-then-reload. Measured: 2-file `/run` 7.0s -> 2.5s,
+   full 13-file whole-farm `/run` 16.4s -> 10.65s. No public API changed
+   (`load_wind_data`/`classify_file_kind`/`load_wind_data_files` all still
+   work byte-in, unchanged). See `src/windlens/upload_tool.py::read_and_classify`
+   docstring for the full measured story.
+2. **Overlay chart ("Outage window in context") now has three independently
+   toggleable lines** (target/reference/reconstructed), each its own
+   `<button class="legend-toggle" data-line="...">` in `workspace/index.html`,
+   wired via module-level `overlayLineVisible` state in `app.js`. The
+   reconstructed line (the model's actual output) is now bold/solid
+   (3.8px, was 2.4px dashed -- previously the LEAST visually prominent of
+   the three, which was backwards).
+3. **Ruthless minimalism pass, Anna's explicit top priority** ("there is so
+   much text we do not need... this is like priority number one"),
+   superseding everything else in the queue at the time it landed. Read both
+   pages' full rendered text end-to-end as a first-time visitor, section by
+   section -- not just the 2-3 examples already flagged earlier. Cut: a
+   doubled "reBAP" in one sentence; a redundant turbine-id repeat in the
+   hero's Model field; Limitations consolidated 5 bullets -> 3 (three of them
+   were near-paraphrases of one fact: no ground truth for the hidden window,
+   checked instead via a separate n=3 shown-window backtest, range = worst
+   of the three); a filler "Assessment signal" eyebrow; a redundant legend
+   qualifier already covered by the chart-foot note; a pure-backstory bullet
+   in "What we'd build next"; a duplicated "no farm-location registry" clause
+   (kept once, in the test-protected T1/T2/T3 intro, cut from the Reconstruction
+   method field); T1's tier card repeating its own headline number a second
+   time; and T2/T3's tier cards sharing an IDENTICAL, word-for-word "Framing"/
+   "Check before relying on this" pair -- moved that one caveat into the
+   section's own intro, stated once, cut from both cards.
+
+Still queued, explicitly waiting (not started this round): the full-period
+self-validation backtest (Anna's idea -- backtest the existing single-reference
+method across every non-overlapping historical block with real ground truth,
+not just the one n=3 shown-window figure) to back the live-upload "not
+applicable" accuracy framing with a real best-available-estimate number; and
+the methodology-page rewrite (now unblocked -- Anna's own friend-model
+comparison is DECIDED: keeping WindLens's current method, not switching,
+because the friend's multi-turbine ML ensemble took 26.88s to fit ONE target
+once vs. WindLens's ~4s for a full multi-target run -- not viable interactively,
+despite being more accurate on 1 of 3 targets). Both wait on Anna's explicit
+"minimalism first" instruction; resume them once that's confirmed done.
+
+Verification this round: 216/216 tests, all 3 check scripts clean, `node
+--check` clean, every single cut verified live via `get_page_text` on both
+routes (official demo loaded + T1/T2/T3 disclosure expanded), zero console
+errors before and after. Cache-bust bumped `20261024l` -> `20261024p` across
+five rounds of frontend edits.
+
+**2026-10-24 (latest+18): Real reBAP price wired in; three minor
+tone fixes.** `src/windlens/energy_price_lookup.py` landed from a separate
+concurrent session (real netztransparenz.de reBAP German balancing-energy
+price, not the illustrative demo price) -- wired its output into the
+Analysis page's financial-impact panel, not built the data-sourcing itself.
+New `GET /energy-price?window_start=...&window_end=...` endpoint
+(`baywa_tool_server.py`) wraps `get_price_for_outage_window()`, returning
+`PriceDataUnavailable` as a plain `{"error": ...}` rather than a crash.
+`renderCommercialPanel(vm)` now fetches this for whichever result's own
+outage window is active, defaults the price field to the real monthly
+average when available (150.88 EUR/MWh, n=2,880 for the real T3 record's
+September 2026 window -- confirmed matching the coordinator's own number
+exactly), and updates the scenario-profile name/note/source/disclaimer text
+to honestly describe a REAL price rather than leaving stale "Illustrative
+demo price" wording next to a real number (a real inconsistency caught by
+actually reading the rendered panel, not just wiring the number). Falls back
+to the illustrative price with an explicit note ("real reBAP price
+unavailable for this window") if the lookup errors or is unreachable --
+never crashes the panel; verified both paths live (September 2026 succeeds,
+January 2026 correctly 400s and the UI falls back cleanly). The editable
+price field still allows a manual override on top of either default.
+
+Three minor tone/consistency fixes from an independent audit: the overlay
+chart's anthropomorphized "Where the model noticed the gap" eyebrow is now
+"Outage window in context"; "insurer-ready" vs. "risk / reinsurance
+reviewer" vs. "Insurance-facing" (three different phrasings of the same
+report within one section) are now all "insurer-ready"/"For an insurer";
+the "evidence terminal" brand subtitle was judged NOT sales-y (plain,
+descriptive, no benefit-claim language) and left unchanged, per the
+instruction to fix only if we agreed it read that way.
+
+**Verification:** 209/209 tests pass (unchanged -- this round added no new
+Python logic requiring new tests beyond what the concurrent session already
+delivered for its own module; the server route and frontend wiring were
+verified live rather than by new unit tests, consistent with how this
+server's other routes are tested). All three check scripts clean.
+`node --check` clean. Live-verified in fresh browser tabs: the real price
+loads and displays correctly with zero console errors, the fallback path
+works correctly for a month with no data, and all three tone fixes render
+as expected.
+
+**2026-10-24 (latest+17): Two big rounds -- P0 fixes (report
+generation, manual-window validation, Start/Result split, aggressive text
+trim), then an urgent structural correction from Anna reversing part of it.**
+
+**Round A (P0s):** (1) Report generation was genuinely disconnected from
+whatever result the user was looking at -- `initInsuranceReport()` always
+read the hardcoded official T3 turbine id, and `insurance_report.py` had NO
+code path for building a report from a live `/run` upload result at all.
+Fixed: `insurance_report.py` gained `build_report_data_for_live_target()` +
+`generate_for_live_target()` (same report/email renderers, branching on
+whether a calibrated bracket exists); a new `POST /insurance-report-for-upload`
+endpoint takes a target-entry dict directly; `app.js` now tracks
+`currentActiveSource`/`currentActiveTargetEntry` globally, set by whichever
+result was last shown, and the report button follows it. Verified live,
+end-to-end, through the real server: uploaded T2, generated its report --
+correctly named T2 with T2's own numbers, not T3. (2) Manual outage-window
+start/end now must be given together -- one without the other is rejected
+with a clear `ValueError`/400, not silently auto-detected instead.
+(3) Start/Result state split, Anna's explicit ask (reversing a prior round's
+"don't build this" call): the Analysis page shows nothing hardcoded on load
+-- a clean "Start your analysis" prompt with an explicit "Load BayWa demo"
+button; the result (demo or upload) only appears once the user acts, labeled
+"BayWa challenge demo" / "Your uploaded analysis" (Codex's exact wording).
+(4) Aggressive, pragmatic text trim across both pages: cut the T3-selection-
+rationale restated 3+ times (next_action, limitations, the BayWa-comparison
+intro all said it; kept it once, on T3's own card), cut three standalone
+caveat paragraphs that were byte-identical or near-identical to text already
+on the per-card "Check before relying on this" fields or the Limitations
+list, cut the `renderAnalysisNarrative` paragraph entirely (every fact in it
+was stated elsewhere on the same page), fixed several stale self-references
+("See the Methodology page" while already on the Methodology page) and one
+dead "see the external validation below" pointer (the extensive section it
+pointed to was removed two rounds ago). Caught and fixed one real regression
+from this pass: `renderLossChart`/the empty-state branch still wrote to a
+`#loss-chart-total` element the trim had deleted -- live-verified in the
+browser (a fresh tab, not a cached one) before trusting it was fixed.
+
+**Round B (urgent correction from Anna, acted on immediately):** she was
+unhappy with where Round A's prior-round edits put the financial-impact and
+report-action blocks. (1) Financial impact (editable price + estimated
+impact) moved OFF the Methodology page and back onto the Analysis/Result
+page, now driven by `renderCommercialPanel(vm)` (replaces the old
+`renderCommercial(assessment, profile)` + the separate read-only
+`refreshFinancialSummary()` mirror -- one interactive block instead of two
+displays of the same number) so it updates correctly for the official demo,
+an uploaded result, AND each row when switching between multi-target uploads.
+(2) Report actions (Generate report / PDF / email) moved off the Methodology
+page too, now sitting directly below the Analysis page's charts, next to the
+result they act on. (3) The Methodology heading "Play around with the
+behavioural analysis" (Anna: "unprofessional") is now "How this estimate was
+built". (4) "Why to trust this record" -- a pass/fail gate UI with colors and
+reasons -- is now "Validation steps taken", a plain numbered list (Input QA,
+reference data overlap, tested wind-speed range, calibrated uncertainty) with
+no persuasive framing, still driven by the same gate data so it stays
+accurate. Caught and fixed one real bug while moving these: the new
+`#result-state` wrapper had no `data-route="overview"` of its own, so two of
+its direct-child elements (the "Back to start" button and the
+"See full validation..." link, which had no `data-route` of their own either)
+bled through onto the Methodology page whenever a result was already loaded
+-- found by actually looking at the rendered Methodology page after loading
+the demo, not by code review alone. Fixed by tagging the wrapper itself.
+NOT done yet, per Anna's explicit "don't touch yet": swapping the illustrative
+demo price for real German balancing-energy price data (a separate session is
+sourcing that module; this session wires its output in once it's ready) and
+removing/keeping the "BayWa challenge-data prediction" T1/T2/T3 section
+(Anna is still deciding).
+
+**Verification (both rounds):** 199/199 tests pass (8 new across both
+rounds: live-upload report generation x4, manual-window one-sided-rejection
+x2, two-separate-gaps-per-turbine x2 from the prior round). All three check
+scripts clean. `node --check workspace/app.js` clean. Live-verified in fresh
+browser tabs (not reused ones with stale console history, which this session
+learned to distrust after being fooled by it twice) against the real running
+server: zero console errors on both routes, the full Start→Load
+demo→Back to start→Upload→multi-target-switch→Generate report flow exercised
+end-to-end with real files through the real `/run` and
+`/insurance-report-for-upload` endpoints, and the financial panel's
+Recalculate button tested with a changed price.
+
+**2026-10-24 (latest+15): Multi-outage detection -- auto-detect
 ALL qualifying gaps per turbine, not just the longest. Anna's explicit ask,
 after the prior round had this scoped out as a stated limitation: "it checks
 for all outages." New `detect_outage_instances()` in `upload_tool.py` returns
@@ -1265,16 +1568,17 @@ failure, work-order, or operator label.
 
 - `node --check workspace/app.js`
 - `PYTHONPATH=src /Users/annaradova/.venv/bin/python3 -m unittest discover -s tests -q`
-- Latest result (2026-10-24, after multi-outage detection -- see this file's
-  "(latest+15)" entry at the top): 193 tests, 193 pass.
-  `openpyxl` is now installed, so the prior 10 Excel-connector failures
-  (noted here as of 2026-10-23) no longer apply.
+- Latest result (2026-10-24, after the P0 batch + Anna's structural
+  correction -- see this file's "(latest+17)" entry at the top): 199 tests,
+  199 pass. `openpyxl` is now installed, so the prior 10 Excel-connector
+  failures (noted here as of 2026-10-23) no longer apply.
 - Browser route check passed for both hash routes (the workspace is now two
-  pages, Result and Methodology, not four) -- a fresh browser tab against the
-  running server showed zero console errors on both, plus a real end-to-end
-  two-separate-gaps `/run` round-trip rendering as two correctly-disambiguated
-  summary rows for the same turbine (see the "(latest+15)" entry at the top
-  for detail).
+  pages, Analysis and Methodology, not four) -- fresh browser tabs (not
+  reused ones) against the running server showed zero console errors on
+  both, plus a real end-to-end Start→Load demo→Upload→multi-target-switch→
+  Generate report flow through the real `/run` and
+  `/insurance-report-for-upload` endpoints (see the "(latest+17)" entry at
+  the top for detail).
 
 ## Next work
 

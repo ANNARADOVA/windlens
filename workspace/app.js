@@ -6,6 +6,15 @@ let chartTruthVisible = false;
 let currentResultVM = null;
 let lastExportPayload = null;
 
+// Independent per-line show/hide for the "Outage window in context" overlay
+// chart (2026-10-24, Anna: "we should show target, reference and
+// reconstructed line (bold) and be able to hide each of them" -- three
+// separate toggles, not one shared on/off). Persists across re-renders of
+// whichever result is currently shown; lastOverlayArgs lets the legend
+// buttons re-render with the same data after a toggle.
+const overlayLineVisible = { target_ms: true, reference_ms: true, reconstructed_ms: true };
+let lastOverlayArgs = null;
+
 function applyRoute() {
   const requested = (window.location.hash || '#overview').slice(1);
   const view = requested === 'method' ? 'method' : 'overview';
@@ -27,6 +36,29 @@ const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;
 // shape into one small object, and renderResultView() is the only thing that
 // touches the DOM. Uploading should feel like it replaces this same view, not
 // like it opens a separate, lesser result area.
+// 2026-10-24, coordinator relaying Anna: a live upload's "Not applicable" for
+// wind-speed/energy error should not just stop there -- give the best
+// available estimate instead, pulled from the shown-window self-validation
+// figures already computed for the official record's three real targets
+// (T1/T2/T3), stated honestly as a cross-reference, not this specific run's
+// own number (which genuinely doesn't exist -- there is no ground truth for
+// a live outage, by construction). No power-deviation equivalent here: the
+// per-target power RMSE for T1/T2 isn't in this comparison data, so that
+// field stays plain "Not applicable" rather than inventing a number for it.
+function selfValidationContext() {
+  const targets = window.WINDLENS_DATA?.baywa_comparison?.targets;
+  if (!targets || !targets.length) return null;
+  const windRmse = targets.map((t) => t.wind_rmse_ms);
+  const energyErr = targets.map((t) => t.energy_relative_error_pct);
+  return {
+    n: targets.length,
+    windRmseMin: Math.min(...windRmse),
+    windRmseMax: Math.max(...windRmse),
+    energyErrMin: Math.min(...energyErr),
+    energyErrMax: Math.max(...energyErr),
+  };
+}
+
 function buildResultViewModel(source, data) {
   if (source === 'official') {
     const a = data.assessment;
@@ -35,6 +67,7 @@ function buildResultViewModel(source, data) {
       source,
       targetId: a.incident.asset_id,
       referenceId: a.reference.selected_asset_id,
+      referenceRanking: a.reference.selection?.ranking || null,
       referenceFallbackNote: null,
       windowStartUtc: a.incident.window_start_utc,
       windowEndUtc: a.incident.window_end_utc,
@@ -50,6 +83,8 @@ function buildResultViewModel(source, data) {
       windMaeMs: a.estimate.wind_mae_ms ?? null,
       powerRmseKw: validation?.power_rmse_kw ?? null,
       powerMaeKw: validation?.power_mae_kw ?? null,
+      energyErrorPct: validation?.relative_error_pct ?? null,
+      selfValidationContext: null,
       overlaySeries: data.overlay_series,
       lossSeries: data.series,
     };
@@ -60,6 +95,7 @@ function buildResultViewModel(source, data) {
     source,
     targetId: t.target_turbine,
     referenceId: t.selected_reference,
+    referenceRanking: t.reference_ranking || null,
     referenceFallbackNote: t.reference_fallback_note || null,
     windowStartUtc: t.outage_window_utc[0],
     windowEndUtc: t.outage_window_utc[1],
@@ -69,10 +105,19 @@ function buildResultViewModel(source, data) {
     kwhInterval: null,
     lostKwhUnavailableReason: hasKwh ? null : (t.estimated_lost_kwh_unavailable_reason || 'No power curve uploaded — wind-speed prediction only.'),
     windowCaveatText: t.raw_reconstruction_notice || 'This is a raw reconstruction from your uploaded data, not validated against ground truth for this event.',
-    windRmseMs: null,
-    windMaeMs: null,
-    powerRmseKw: null,
-    powerMaeKw: null,
+    // 2026-10-24, Anna, high priority: a real wind/power error figure for
+    // THIS upload's own data, not just a cross-reference to the official
+    // record -- backend finds one clean, same-duration window elsewhere in
+    // the same upload and reconstructs it the same way (see upload_tool.py
+    // _self_validate()). Falls back to the n=3 cross-reference below only
+    // when no clean window exists anywhere in the uploaded data.
+    windRmseMs: t.self_validation?.wind_rmse_ms ?? null,
+    windMaeMs: t.self_validation?.wind_mae_ms ?? null,
+    powerRmseKw: t.self_validation?.power_rmse_kw ?? null,
+    powerMaeKw: t.self_validation?.power_mae_kw ?? null,
+    energyErrorPct: t.self_validation?.energy_relative_error_pct ?? null,
+    selfValidationWindowUtc: t.self_validation?.window_utc ?? null,
+    selfValidationContext: selfValidationContext(),
     overlaySeries: { points: t.overlay_series || [] },
     lossSeries: hasKwh
       ? { interval_minutes: t.inferred_cadence_minutes, points: t.predictions.map((p) => ({ timestamp_utc: p.timestamp_utc, reconstructed_ms: p.wind_speed_ms_predicted })) }
@@ -80,19 +125,81 @@ function buildResultViewModel(source, data) {
   };
 }
 
-function refreshFinancialSummary() {
+// 2026-10-24 (Anna's correction): financial impact is part of THIS result, not
+// an explanation of the method -- the editable price and the estimated impact
+// now live on the Analysis page next to whichever result (official demo or
+// uploaded run) is currently showing, driven directly by the view-model
+// instead of the official assessment object alone.
+let commercialPanelRequestId = 0;
+// Tracks whatever price source is CURRENTLY shown in the financial panel, so
+// a generated report can use the exact same price/source instead of silently
+// re-loading the fixed illustrative demo profile (2026-10-24 correctness fix
+// -- the report used to show a different EUR figure than the page itself).
+let currentPriceSourceLabel = 'Illustrative demo price, not sourced from BayWa data';
+let currentPriceIsReal = false;
+
+function renderCommercialPanel(vm) {
   const profile = window.WINDLENS_DATA?.commercial;
-  if (!profile || !currentResultVM || !$('result-financial-value')) return;
-  const priceInput = $('commercial-price');
-  const price = priceInput && priceInput.value !== '' ? Number(priceInput.value) : profile.fixed_price_eur_per_mwh;
-  if (currentResultVM.lostKwh == null) {
-    $('result-financial-value').textContent = '—';
-    $('result-financial-note').textContent = currentResultVM.lostKwhUnavailableReason || 'No energy estimate available for this record.';
-    return;
+  if (!profile || !$('commercial-price')) return;
+  const requestId = ++commercialPanelRequestId;
+  const illustrativeCaption = `${profile.currency}, priced in ${profile.settlement_interval_minutes}-minute intervals, from Illustrative demo price, not sourced from BayWa data`;
+
+  $('commercial-profile-name').textContent = 'Demo price (illustrative)';
+  $('commercial-profile-note').textContent = 'Replace with a verified PPA or market-price feed before operational use.';
+  currentPriceSourceLabel = 'Illustrative demo price, not sourced from BayWa data';
+  currentPriceIsReal = false;
+  $('commercial-price').value = profile.fixed_price_eur_per_mwh ?? '';
+  $('commercial-source').textContent = illustrativeCaption;
+  if ($('commercial-disclaimer')) $('commercial-disclaimer').textContent = 'Indicative only — not a settlement, contractual, or legal value.';
+
+  const update = () => {
+    const price = Number($('commercial-price').value);
+    if (vm.lostKwh == null) {
+      $('commercial-value').textContent = '—';
+      $('commercial-range').textContent = vm.lostKwhUnavailableReason || 'No energy estimate available for this result.';
+      return;
+    }
+    const value = vm.lostKwh / 1000 * price;
+    $('commercial-value').textContent = `${profile.currency} ${fmt(value, 0)}`;
+    $('commercial-range').textContent = vm.kwhInterval
+      ? `Interval: ${profile.currency} ${fmt(vm.kwhInterval.lower_kwh / 1000 * price, 0)}–${fmt(vm.kwhInterval.upper_kwh / 1000 * price, 0)} (±${fmt(vm.kwhInterval.worst_observed_relative_error_pct, 0)}%)`
+      : 'No comparable range for a single run.';
+  };
+  $('recalculate-commercial').onclick = update;
+  update();
+
+  // 2026-10-24: default the price to the real German balancing-energy price
+  // (reBAP) for THIS result's own outage window, when it's available, instead
+  // of the illustrative 85 EUR/MWh -- the editable field still allows a manual
+  // override on top. Never lets a missing/unreachable price crash the panel;
+  // falls back to the illustrative price with a plain note instead.
+  if (vm.windowStartUtc && vm.windowEndUtc) {
+    const params = new URLSearchParams({
+      window_start: vm.windowStartUtc.slice(0, 10),
+      window_end: vm.windowEndUtc.slice(0, 10),
+    });
+    fetch(`/energy-price?${params}`)
+      .then((response) => response.json())
+      .then((priceResult) => {
+        if (requestId !== commercialPanelRequestId) return; // a newer result is now showing
+        if (priceResult.error) {
+          $('commercial-source').textContent = `${illustrativeCaption} (real reBAP price unavailable for this window)`;
+          return;
+        }
+        $('commercial-price').value = priceResult.average_price_eur_per_mwh;
+        $('commercial-profile-name').textContent = 'reBAP — Germany’s real balancing-energy price';
+        $('commercial-profile-note').textContent = `Monthly average for this outage window (${fmt(priceResult.n_price_points)} real price readings).`;
+        $('commercial-source').innerHTML = `Unit: EUR/MWh · Source: <a href="${esc(priceResult.source_url)}" target="_blank" rel="noopener">${esc(priceResult.source_name)}</a>`;
+        if ($('commercial-disclaimer')) $('commercial-disclaimer').textContent = 'Indicative only — not a settlement, contractual, or legal value.';
+        currentPriceSourceLabel = priceResult.source_name;
+        currentPriceIsReal = true;
+        update();
+      })
+      .catch(() => {
+        if (requestId !== commercialPanelRequestId) return;
+        $('commercial-source').textContent = `${illustrativeCaption} (could not reach the price lookup)`;
+      });
   }
-  const value = currentResultVM.lostKwh / 1000 * price;
-  $('result-financial-value').textContent = `${profile.currency} ${fmt(value, 0)}`;
-  $('result-financial-note').textContent = `At ${profile.currency} ${fmt(price, 2)}/MWh (demo price, ${currentResultVM.source === 'official' ? 'adjustable' : 'same demo price'} on the Methodology page). Indicative only.`;
 }
 
 function renderResultView(vm) {
@@ -100,40 +207,57 @@ function renderResultView(vm) {
   $('asset-id').textContent = vm.targetId;
   $('assessment-window').textContent = `${shortDate(vm.windowStartUtc)} — ${shortDate(vm.windowEndUtc)}`;
   $('reference-id').textContent = vm.referenceId;
-  $('review-label').textContent = vm.reviewLabel || (vm.source === 'upload' ? 'Live run (ungraded)' : '—');
+  if (vm.referenceRanking && vm.referenceRanking.length) {
+    const sorted = [...vm.referenceRanking].sort((a, b) => b.holdout_r2 - a.holdout_r2);
+    const selected = sorted.find((r) => r.turbine_id === vm.referenceId);
+    const others = sorted.filter((r) => r.turbine_id !== vm.referenceId).map((r) => r.turbine_id);
+    $('reference-id').dataset.tooltip = selected
+      ? `Selected for the best pre-outage correlation with the target (holdout R² ${fmt(selected.holdout_r2, 3)})${others.length ? `, ranked above ${others.join(', ')}` : ''}.`
+      : '';
+  } else {
+    $('reference-id').dataset.tooltip = '';
+  }
+  $('review-label').textContent = vm.reviewLabel || '—';
   if ($('reference-fallback-note')) {
     $('reference-fallback-note').hidden = !vm.referenceFallbackNote;
     $('reference-fallback-note').textContent = vm.referenceFallbackNote || '';
   }
-  if ($('result-source-tag')) $('result-source-tag').textContent = vm.source === 'official' ? 'REAL BAYWA T3 RECORD' : 'YOUR LIVE RUN';
+  if ($('result-source-tag')) $('result-source-tag').textContent = vm.source === 'official' ? 'BayWa challenge demo' : 'Your uploaded analysis';
 
   $('lost-kwh').textContent = vm.lostKwh != null ? fmt(vm.lostKwh, 0) : '—';
+  if ($('loss-chart-kwh')) $('loss-chart-kwh').textContent = vm.lostKwh != null ? `${fmt(vm.lostKwh, 0)} kWh` : '—';
   const windowDays = Math.max(1, Math.round((new Date(vm.windowEndUtc) - new Date(vm.windowStartUtc)) / 86400000));
   if ($('window-duration')) $('window-duration').textContent = `${windowDays} day${windowDays === 1 ? '' : 's'}`;
   $('hero-kwh-range').textContent = vm.kwhInterval
-    ? (vm.kwhInterval.display_text || `${fmt(vm.kwhInterval.lower_kwh, 0)} – ${fmt(vm.kwhInterval.upper_kwh, 0)} kWh`)
+    ? `Interval: ${fmt(vm.kwhInterval.lower_kwh, 0)}–${fmt(vm.kwhInterval.upper_kwh, 0)} kWh (±${fmt(vm.kwhInterval.worst_observed_relative_error_pct, 0)}%)`
     : vm.lostKwh != null
-      ? 'No event-level kWh interval available for this record.'
+      ? 'No interval available for this record.'
       : (vm.lostKwhUnavailableReason || '—');
-  $('hero-window-caveat').textContent = vm.windowCaveatText || '';
-  $('hero-review-state').textContent = vm.reviewLabel || (vm.source === 'upload' ? 'Live, ungraded run' : '—');
-  if ($('model-name')) $('model-name').textContent = `single reference turbine (${vm.referenceId})`;
+  if ($('model-name')) $('model-name').textContent = 'single reference turbine';
 
+  const svc = vm.selfValidationContext;
   if ($('result-wind-error')) {
     $('result-wind-error').textContent = vm.windRmseMs != null
-      ? `${fmt(vm.windRmseMs, 2)} / ${fmt(vm.windMaeMs, 2)} m/s`
-      : 'Not applicable — no ground truth for this window, by construction';
+      ? `${fmt(vm.windRmseMs, 2)} / ${fmt(vm.windMaeMs, 2)} m/s (checked on a different window with known data)`
+      : svc
+        ? `Not computable for this window (no recorded truth exists) — typically ${fmt(svc.windRmseMin, 1)}–${fmt(svc.windRmseMax, 1)} m/s wind RMSE, from the n=${svc.n} shown-window backtest on the real BayWa targets (see Methodology)`
+        : 'Not applicable — no ground truth for this window, by construction';
   }
   if ($('result-power-error')) {
     $('result-power-error').textContent = vm.powerRmseKw != null
-      ? `${fmt(vm.powerRmseKw, 0)} / ${fmt(vm.powerMaeKw, 0)} kW`
-      : 'Not applicable — no ground truth for this window, by construction';
+      ? `${fmt(vm.powerRmseKw, 0)} / ${fmt(vm.powerMaeKw, 0)} kW (checked on a different window with known data)`
+      : 'Not applicable — no ground truth for this window, by construction (no comparable power-deviation backtest available)';
   }
-  if ($('gate-count')) $('gate-count').textContent = vm.source === 'official' ? 'Real BayWa T3 submission' : 'Live, ungraded run';
+  if ($('result-energy-error')) {
+    $('result-energy-error').textContent = vm.energyErrorPct != null
+      ? `${fmt(vm.energyErrorPct, 1)}%`
+      : svc
+        ? `Not computable for this window (no recorded truth exists) — ranges ${fmt(svc.energyErrMin, 1)}–${fmt(svc.energyErrMax, 1)}% across the n=${svc.n} real validation targets (see Methodology)`
+        : 'Not applicable — no ground truth for this window, by construction';
+  }
+  if ($('gate-count')) $('gate-count').textContent = vm.source === 'official' ? 'Real BayWa T3 submission' : 'Your own upload — not independently reviewed';
 
-  $('next-action').textContent = vm.nextAction || 'Review the evidence below, then decide how to act on this live run.';
-
-  refreshFinancialSummary();
+  renderCommercialPanel(vm);
   renderOverlayChart(vm.overlaySeries, vm.windowStartUtc, vm.windowEndUtc);
 
   if (vm.lostKwh != null && vm.lossSeries) {
@@ -141,7 +265,6 @@ function renderResultView(vm) {
     renderLossChart(vm.lossSeries, vm.lostKwh);
   } else {
     $('loss-chart-wrap').innerHTML = '<div class="loading">No energy estimate to chart.</div>';
-    $('loss-chart-total').textContent = '—';
     $('loss-chart-range').textContent = '—';
     $('loss-chart-unavailable').hidden = false;
   }
@@ -150,11 +273,12 @@ function renderResultView(vm) {
 function renderOverlayChart(overlay, windowStartUtc, windowEndUtc) {
   const wrap = $('overlay-chart-wrap');
   if (!wrap) return;
+  lastOverlayArgs = [overlay, windowStartUtc, windowEndUtc];
   const points = (overlay && overlay.points) || [];
   if (!points.length) { wrap.innerHTML = '<div class="loading">No overlay series available for this run.</div>'; $('overlay-chart-range').textContent = '—'; return; }
 
   const width = 1000, height = 240, pad = { left:42, right:18, top:12, bottom:30 };
-  const values = points.flatMap((p) => [p.target_ms, p.reference_ms]).filter((v) => v != null);
+  const values = points.flatMap((p) => [p.target_ms, p.reference_ms, p.reconstructed_ms]).filter((v) => v != null);
   const min = Math.floor(Math.min(...values) - 0.5), max = Math.ceil(Math.max(...values) + 0.5);
   const x = (i) => pad.left + i / (points.length - 1) * (width - pad.left - pad.right);
   const y = (v) => height - pad.bottom - (v - min) / (max - min) * (height - pad.top - pad.bottom);
@@ -178,7 +302,8 @@ function renderOverlayChart(overlay, windowStartUtc, windowEndUtc) {
   };
   const grid = [min, min + (max - min) / 2, max].map((v) => `<line x1="${pad.left}" x2="${width-pad.right}" y1="${y(v)}" y2="${y(v)}"/><text x="0" y="${y(v)+4}">${v.toFixed(1)}</text>`).join('');
 
-  wrap.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Target and reference wind speed, with the outage window shaded"><g class="chart-grid">${grid}</g>${band}<path class="chart-truth" d="${linePath('reference_ms')}"/><path class="chart-reconstructed" d="${linePath('target_ms')}"/><line class="chart-crosshair" x1="0" x2="0" y1="${pad.top}" y2="${height-pad.bottom}"/><rect class="chart-hit-area" x="${pad.left}" y="${pad.top}" width="${width-pad.left-pad.right}" height="${height-pad.top-pad.bottom}"/><text class="axis-label" x="${pad.left}" y="${height-5}">${shortDate(points[0].timestamp_utc)}</text><text class="axis-label" text-anchor="end" x="${width-pad.right}" y="${height-5}">${shortDate(points[points.length-1].timestamp_utc)}</text></svg>`;
+  const hiddenClass = (key) => (overlayLineVisible[key] ? '' : ' is-hidden');
+  wrap.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Target, reference, and reconstructed wind speed, with the outage window shaded"><g class="chart-grid">${grid}</g>${band}<path class="chart-truth${hiddenClass('reference_ms')}" d="${linePath('reference_ms')}"/><path class="chart-reconstructed${hiddenClass('target_ms')}" d="${linePath('target_ms')}"/><path class="chart-predicted-line${hiddenClass('reconstructed_ms')}" d="${linePath('reconstructed_ms')}"/><line class="chart-crosshair" x1="0" x2="0" y1="${pad.top}" y2="${height-pad.bottom}"/><rect class="chart-hit-area" x="${pad.left}" y="${pad.top}" width="${width-pad.left-pad.right}" height="${height-pad.top-pad.bottom}"/><text class="axis-label" x="${pad.left}" y="${height-5}">${shortDate(points[0].timestamp_utc)}</text><text class="axis-label" text-anchor="end" x="${width-pad.right}" y="${height-5}">${shortDate(points[points.length-1].timestamp_utc)}</text></svg>`;
   $('overlay-chart-range').textContent = `${points.length} plotted points`;
 
   const svg = wrap.querySelector('svg'), crosshair = svg.querySelector('.chart-crosshair'), tooltip = $('overlay-chart-tooltip');
@@ -186,7 +311,8 @@ function renderOverlayChart(overlay, windowStartUtc, windowEndUtc) {
     const box = svg.getBoundingClientRect(), ratio = (event.clientX - box.left) / box.width, i = Math.max(0, Math.min(points.length - 1, Math.round(ratio * (points.length - 1))));
     const point = points[i], xPos = x(i);
     crosshair.setAttribute('x1', xPos); crosshair.setAttribute('x2', xPos); crosshair.classList.add('visible');
-    tooltip.innerHTML = `<strong>${new Date(point.timestamp_utc).toLocaleString('en-GB', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'UTC'})} UTC</strong><span>Target: ${point.target_ms != null ? fmt(point.target_ms, 2) + ' m/s' : 'gap — reconstructed from reference'}</span><span>Reference: ${point.reference_ms != null ? fmt(point.reference_ms, 2) + ' m/s' : '—'}</span>`;
+    const reconstructedLine = point.reconstructed_ms != null ? `<span>Reconstructed: ${fmt(point.reconstructed_ms, 2)} m/s</span>` : '';
+    tooltip.innerHTML = `<strong>${new Date(point.timestamp_utc).toLocaleString('en-GB', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'UTC'})} UTC</strong><span>Target: ${point.target_ms != null ? fmt(point.target_ms, 2) + ' m/s' : 'gap — reconstructed from reference'}</span><span>Reference: ${point.reference_ms != null ? fmt(point.reference_ms, 2) + ' m/s' : '—'}</span>${reconstructedLine}`;
     tooltip.style.left = `${Math.min(Math.max(event.clientX - box.left + 12, 8), box.width - 190)}px`; tooltip.classList.add('visible');
   });
   svg.querySelector('.chart-hit-area').addEventListener('mouseleave', () => { crosshair.classList.remove('visible'); tooltip.classList.remove('visible'); });
@@ -196,69 +322,32 @@ function renderOverlayChart(overlay, windowStartUtc, windowEndUtc) {
 // BayWa T3 record only -- a live upload's own result stays on Page 1 and is not
 // repeated here.
 function renderMethodologyDetail(a) {
-  const validation = a.validation;
-  $('reference-detail').textContent = a.reference.selected_asset_id;
-  if ($('hidden-window-points')) {
-    const checked = (a.reference.domain_checks || []).reduce((sum, c) => sum + (c.observations_during || 0), 0);
-    $('hidden-window-points').textContent = checked ? fmt(checked) : '—';
-  }
-  $('domain-status').textContent = a.reference.within_validated_domain ? 'Within tested range' : 'Outside tested range';
-  $('alignment-status').textContent = a.reference.target_aligned ? 'Matches' : 'Needs review';
-  $('error-value').textContent = `${fmt(validation.relative_error_pct, 1)}%`;
-  $('paired-count').textContent = fmt(validation.compared_observations);
-  $('wind-rmse').textContent = `${fmt(a.estimate.wind_rmse_ms, 2)} m/s`;
-  $('wind-bias').textContent = `${a.estimate.wind_signed_bias_ms >= 0 ? '+' : ''}${fmt(a.estimate.wind_signed_bias_ms, 2)} m/s`;
-  $('hidden-kwh').textContent = `${fmt(validation.proxy_truth_kwh ?? validation.hidden_truth_kwh, 0)} kWh`;
-  if ($('hidden-kwh-label')) $('hidden-kwh-label').textContent = validation.proxy_truth_kwh != null ? 'Proxy truth (curve-derived)' : 'Actual value';
   $('method-version').textContent = a.provenance.method_version;
   $('method-reconstruction').textContent = a.method.reconstruction;
   $('method-energy').textContent = a.method.energy_integration;
-  const u = a.estimate.uncertainty;
-  if (u?.status === 'available') {
-    const target = u.calibration.coverage_target * 100;
-    const observed = u.event_evaluation.coverage_pct;
-    $('coverage-value').textContent = `${fmt(observed, 1)}%`;
-    $('target-coverage').textContent = `${fmt(target, 0)}% target`;
-    $('interval-width').textContent = `${fmt(u.event_evaluation.mean_width_ms, 2)} m/s`;
-    $('uncertainty-note').textContent = observed < target ? 'Under target on this held-out block; treat as a review signal.' : 'Coverage met the calibration target on this block.';
-  } else {
-    $('coverage-value').textContent = 'n/a';
-    $('uncertainty-note').textContent = u?.reason || 'No interval available.';
-  }
   $('limitations').innerHTML = a.limitations.map((item) => `<li>${item}</li>`).join('');
 
+  // 2026-10-24 (Anna's correction): procedural, not persuasive -- a plain,
+  // factual, ordered list of the validation steps taken, not a pass/fail
+  // gate UI with reasons/colors. Still driven by the same gate data so it
+  // stays accurate; a step not yet evaluated says so plainly, in the same
+  // neutral list, not flagged with its own styling.
   if (a.review.gates && $('trust-gates')) {
-    const failedCount = a.review.gates.filter((g) => g.state === 'fail').length;
-    const notEvaluatedCount = a.review.gates.filter((g) => g.state === 'not_evaluated').length;
-    const label = [
-      failedCount ? `${failedCount} failed` : '',
-      notEvaluatedCount ? `${notEvaluatedCount} not evaluated` : '',
-    ].filter(Boolean).join(', ') || 'All gates passed';
-    if ($('method-gate-count')) $('method-gate-count').textContent = label;
     $('trust-gates').innerHTML = a.review.gates.map((g) => {
-      const cls = g.state === 'pass' ? '' : g.state === 'not_evaluated' ? 'not-evaluated' : 'fail';
-      const mark = g.state === 'pass' ? '✓' : g.state === 'not_evaluated' ? '?' : '!';
-      const reason = g.state === 'pass' ? '' : `<p class="gate-reason">${g.reason || 'This gate failed.'}</p>`;
-      return `<div class="gate ${cls}"><span class="gate-mark">${mark}</span><span>${g.label}</span><small>${g.detail || ''}</small>${reason}</div>`;
+      const detail = g.state === 'not_evaluated' ? (g.reason || g.detail || '') : (g.detail || '');
+      return `<li><strong>${esc(g.label)}</strong> — ${esc(detail)}</li>`;
     }).join('');
   }
 }
 
 function tierCardsHtml(tiers) {
-  return tiers.map((t) => `<article class="tier"><span class="tier-tag">${esc(t.tag)}</span><h3>${esc(t.name)}</h3><div class="tier-value">${esc(t.headline_value)}<small>${esc(t.headline_label)}</small></div><div class="tier-stats">${t.stats.map(([k, v]) => `<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div><p class="tier-frame"><b>Framing:</b> ${esc(t.framing)}</p><p class="tier-frame"><b>Check before relying on this:</b> ${esc(t.does_not_prove)}</p></article>`).join('');
+  return tiers.map((t) => `<article class="tier"><span class="tier-tag">${esc(t.tag)}</span><h3>${esc(t.name)}</h3><div class="tier-value">${esc(t.headline_value)}<small>${esc(t.headline_label)}</small></div><div class="tier-stats">${t.stats.map(([k, v]) => `<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>${t.framing ? `<p class="tier-frame"><b>Framing:</b> ${esc(t.framing)}</p>` : ''}${t.does_not_prove ? `<p class="tier-frame"><b>Check before relying on this:</b> ${esc(t.does_not_prove)}</p>` : ''}</article>`).join('');
 }
 
-function renderAnalysisNarrative(data, assessment) {
-  const el = $('analysis-narrative-text');
-  if (!data || !el) return;
-  const primary = data.targets.find((t) => t.is_overview_record) || data.targets[0];
-  const others = data.targets.filter((t) => t !== primary);
-  const othersText = others
-    .map((t) => `${t.target_turbine} ${fmt(t.energy_relative_error_pct, 2)}%${t.is_outlier ? ' (a wind-match outlier, not a general problem)' : ''}`)
-    .join(', ');
-  el.textContent = `${primary.target_turbine}'s turbine is predicted to have lost ${fmt(assessment.estimate.lost_energy_kwh, 0)} kWh during its outage window (${shortDate(assessment.incident.window_start_utc)} – ${shortDate(assessment.incident.window_end_utc)}), reconstructed from reference turbine ${primary.selected_reference}'s real wind readings — the real graded prediction, with no ground truth to check it against, by construction. This method's accuracy is supported by a separate self-validation test on a different window (${primary.target_turbine} ${fmt(primary.energy_relative_error_pct, 2)}%, ${othersText}), where real recorded wind did exist to check against.`;
-}
-
+// 2026-10-24: restored as a collapsed <details> disclosure (Anna's call --
+// keep it, just not prominent) after an earlier round removed it entirely.
+// Still load-bearing: the n=3 observed-error bracket and the Limitations
+// text both reference this comparison.
 function renderBaywaComparison(data) {
   if (!data || !$('baywa-targets-grid')) return;
   $('baywa-targets-intro').textContent = data.intro;
@@ -273,17 +362,18 @@ function renderBaywaComparison(data) {
       ['Wind RMSE', `${fmt(t.wind_rmse_ms, 2)} m/s`],
       ['Hidden-window prediction', `${fmt(t.hidden_window_estimated_kwh, 0)} kWh (no truth to score against)`],
     ],
+    // 2026-10-24 minimalism pass: the generic "one of the three real BayWa
+    // targets" framing and the "every target reconstructs well, see T1"
+    // caveat were identical, word-for-word, on both the T2 and T3 cards --
+    // said once now, in the section intro above the grid, instead of twice.
     framing: t.is_overview_record
       ? `${t.target_turbine} is the primary graded target for this submission. It was selected for presentation because its shown-window self-validation error (${fmt(t.energy_relative_error_pct, 2)}%) is the median of the three targets' errors — a reasonable match to expect for the ungraded hidden window too.`
       : t.is_outlier
         ? 'This target’s error is materially worse than the other two.'
-        : 'One of the three real BayWa targets in this assessment.',
-    does_not_prove: t.is_outlier ? data.outlier_explanation : 'That every target in this dataset reconstructs this well — see T1 for the counter-example.',
+        : '',
+    does_not_prove: t.is_outlier ? data.outlier_explanation : '',
   }));
   $('baywa-targets-grid').innerHTML = tierCardsHtml(cards);
-  $('baywa-targets-outlier').innerHTML = `<b>On T1's outlier:</b> ${esc(data.outlier_explanation)}`;
-  $('baywa-targets-hidden-caveat').innerHTML = `<b>On the hidden-window figures above:</b> ${esc(data.hidden_window_caveat)}`;
-  $('baywa-targets-proxy-caveat').innerHTML = `<b>On "truth" energy:</b> ${esc(data.proxy_truth_caveat)}`;
 }
 
 function renderChart(series) {
@@ -332,7 +422,6 @@ function renderLossChart(series, totalKwh) {
   const area = `M ${x(0).toFixed(1)} ${y(0).toFixed(1)} ${line} L ${x(points.length - 1).toFixed(1)} ${y(0).toFixed(1)} Z`;
   const grid = [0, max / 2, max].map(v => `<line x1="${pad.left}" x2="${width-pad.right}" y1="${y(v)}" y2="${y(v)}"/><text x="0" y="${y(v)+4}">${fmt(v, 0)}</text>`).join('');
   $('loss-chart-wrap').innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Cumulative estimated lost energy, in kilowatt-hours, over the outage window"><g class="chart-grid">${grid}</g><path class="loss-chart-area" d="${area}"/><path class="loss-chart-line" d="${line}"/><line class="chart-crosshair" x1="0" x2="0" y1="${pad.top}" y2="${height-pad.bottom}"/><rect class="chart-hit-area" x="${pad.left}" y="${pad.top}" width="${width-pad.left-pad.right}" height="${height-pad.top-pad.bottom}"/><text class="axis-label" x="${pad.left}" y="${height-5}">${shortDate(points[0].timestamp_utc)}</text><text class="axis-label" text-anchor="end" x="${width-pad.right}" y="${height-5}">${shortDate(points[points.length-1].timestamp_utc)}</text></svg>`;
-  $('loss-chart-total').textContent = fmt(totalKwh, 0);
   $('loss-chart-range').textContent = `${points.length} plotted intervals / ${series.interval_minutes}-minute cadence`;
   const svg = $('loss-chart-wrap').querySelector('svg'), crosshair = svg.querySelector('.chart-crosshair'), tooltip = $('loss-chart-tooltip');
   svg.querySelector('.chart-hit-area').addEventListener('mousemove', (event) => {
@@ -345,32 +434,12 @@ function renderLossChart(series, totalKwh) {
   svg.querySelector('.chart-hit-area').addEventListener('mouseleave', () => { crosshair.classList.remove('visible'); tooltip.classList.remove('visible'); });
 }
 
-function renderCommercial(a, profile) {
-  if (!profile) return;
-  $('commercial-profile-name').textContent = profile.display_name || profile.profile_id;
-  $('commercial-profile-note').textContent = profile.notes || 'Saved commercial profile.';
-  $('commercial-price').value = profile.fixed_price_eur_per_mwh ?? '';
-  $('commercial-source').textContent = `${profile.currency}, priced in ${profile.settlement_interval_minutes}-minute intervals, from ${profile.source}`;
-  const update = () => {
-    const price = Number($('commercial-price').value);
-    const value = a.estimate.lost_energy_kwh / 1000 * price;
-    $('commercial-value').textContent = `${profile.currency} ${fmt(value, 0)}`;
-    const interval = a.estimate.kwh_interval;
-    $('commercial-range').textContent = interval
-      ? `${profile.currency} ${fmt(interval.lower_kwh / 1000 * price, 0)} – ${fmt(interval.upper_kwh / 1000 * price, 0)} (same event-level band as the kWh estimate)`
-      : '—';
-    refreshFinancialSummary();
-  };
-  $('recalculate-commercial').onclick = update;
-  update();
-}
-
 function renderUploadSelectionSummary(files) {
   const summary = $('upload-selection-summary');
   if (!summary) return;
   if (!files.length) { summary.hidden = true; summary.innerHTML = ''; return; }
   summary.hidden = false;
-  summary.innerHTML = '<p class="small-note">Checking selected files…</p>';
+  summary.innerHTML = '<p class="small-note loading-row"><span class="spinner" aria-hidden="true"></span>Checking selected files…</p>';
   const formData = new FormData();
   for (const f of files) formData.append('files', f);
   fetch('/preview', { method: 'POST', body: formData })
@@ -415,26 +484,53 @@ function renderUploadTargetsSummary(targets) {
     button.addEventListener('click', () => {
       list.querySelectorAll('.upload-target-row').forEach((b) => b.classList.remove('active'));
       button.classList.add('active');
-      renderResultView(buildResultViewModel('upload', okTargets[Number(button.dataset.index)]));
+      const selected = okTargets[Number(button.dataset.index)];
+      currentActiveSource = 'upload';
+      currentActiveTargetEntry = selected;
+      renderResultView(buildResultViewModel('upload', selected));
       window.scrollTo({ top: 0, behavior: 'smooth' });
     });
   });
 }
 
-function showOfficialRecord() {
+// ---- Start/Result state (2026-10-24, Anna's explicit ask): the Analysis page
+// shows nothing hardcoded on load -- a clean "Start your analysis" prompt with
+// an explicit "Load BayWa demo" button, not an automatic official record. The
+// result view (whichever source) only appears once the user acts.
+function showStartState() {
+  $('start-state').hidden = false;
+  $('result-state').hidden = true;
+}
+
+function showResultState() {
+  $('start-state').hidden = true;
+  $('result-state').hidden = false;
+}
+
+// Tracks whichever result is currently on screen, globally -- read by the
+// report-generation button (physically on the Methodology page) so it always
+// reports on what the user is actually looking at, not a hardcoded lookup.
+let currentActiveSource = null; // 'official' | 'upload'
+let currentActiveTargetEntry = null; // raw /run target dict, only set for 'upload'
+let currentActiveOfficialTargetId = null; // e.g. 'T3', only set for 'official'
+
+function loadBaywaDemo() {
   renderResultView(buildResultViewModel('official', window.WINDLENS_DATA));
   lastExportPayload = window.WINDLENS_DATA;
-  $('upload-reset').hidden = true;
-  $('upload-form').hidden = false;
+  currentActiveSource = 'official';
+  currentActiveTargetEntry = null;
+  currentActiveOfficialTargetId = window.WINDLENS_DATA?.assessment?.incident?.asset_id || null;
   $('upload-error').hidden = true;
   if ($('upload-targets-summary')) { $('upload-targets-summary').hidden = true; $('upload-targets-list').innerHTML = ''; }
+  showResultState();
 }
 
 function initUploadForm() {
   const form = $('upload-form');
   if (!form) return;
   $('upload-files')?.addEventListener('change', (event) => renderUploadSelectionSummary(event.target.files));
-  $('upload-reset')?.addEventListener('click', showOfficialRecord);
+  $('load-demo-button')?.addEventListener('click', loadBaywaDemo);
+  $('back-to-start-button')?.addEventListener('click', showStartState);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const files = $('upload-files').files;
@@ -456,14 +552,16 @@ function initUploadForm() {
       }
       const extraErrors = result.targets.filter((t) => t.error);
       lastExportPayload = result;
+      currentActiveSource = 'upload';
+      currentActiveTargetEntry = ok;
+      currentActiveOfficialTargetId = null;
       renderUploadTargetsSummary(result.targets);
       renderResultView(buildResultViewModel('upload', ok));
       if (extraErrors.length) {
         $('upload-error').hidden = false;
         $('upload-error').textContent = `Showing ${ok.target_turbine} above. ${extraErrors.length} other target(s) in this upload could not be reconstructed: ${extraErrors.map((t) => `${t.target_turbine} (${t.error})`).join('; ')}`;
       }
-      $('upload-form').hidden = true;
-      $('upload-reset').hidden = false;
+      showResultState();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (error) {
       $('upload-error').hidden = false;
@@ -503,12 +601,39 @@ function initInsuranceReport() {
   const panel = $('insurance-report-panel');
   $('insurance-report-close')?.addEventListener('click', () => { panel.hidden = true; });
   button.addEventListener('click', async () => {
-    const target = window.WINDLENS_DATA?.assessment?.incident?.asset_id;
-    if (!target) return;
+    // 2026-10-24 correctness fix: this used to always read the hardcoded
+    // official demo's turbine id, regardless of what the user was actually
+    // looking at -- a report requested after an upload silently showed the
+    // official T3 record (or errored for a non-T1/T2/T3 turbine). Now it
+    // follows currentActiveSource/currentActiveTargetEntry, set by whichever
+    // result was last shown on the Analysis page (demo or a specific
+    // uploaded/selected target).
+    const isUpload = currentActiveSource === 'upload' && currentActiveTargetEntry;
+    const target = isUpload ? currentActiveTargetEntry.target_turbine : (currentActiveOfficialTargetId || window.WINDLENS_DATA?.assessment?.incident?.asset_id);
+    if (!target) {
+      $('insurance-report-text').textContent = 'No result is currently active -- go to the Analysis page, load the BayWa demo or upload your own data, then generate the report again.';
+      panel.hidden = false;
+      return;
+    }
     panel.hidden = false;
     $('insurance-report-text').textContent = 'Generating…';
     try {
-      const response = await fetch(`/insurance-report?target=${encodeURIComponent(target)}`);
+      // 2026-10-24 correctness fix: pass the SAME price the page is currently
+      // showing for this result (read from the live price input, not the
+      // cached default) so the report never shows a different financial
+      // figure than the page it was generated from.
+      const priceParams = new URLSearchParams({
+        price_eur_per_mwh: $('commercial-price').value,
+        price_source: currentPriceSourceLabel,
+        price_is_real: String(currentPriceIsReal),
+      });
+      const response = isUpload
+        ? await fetch(`/insurance-report-for-upload?${priceParams}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(currentActiveTargetEntry),
+          })
+        : await fetch(`/insurance-report?target=${encodeURIComponent(target)}&${priceParams}`);
       const result = await response.json();
       if (result.error) { $('insurance-report-text').textContent = result.error; return; }
       $('insurance-report-text').textContent = result.report_markdown;
@@ -556,12 +681,16 @@ function initInsuranceReport() {
 async function boot() {
   try {
     if (!window.WINDLENS_DATA) throw new Error('window.WINDLENS_DATA not found -- assessment-data.js did not load');
-    renderResultView(buildResultViewModel('official', window.WINDLENS_DATA));
+    // 2026-10-24 (Anna's explicit ask): the Analysis page shows nothing
+    // hardcoded on load -- Start state (upload prompt + explicit "Load BayWa
+    // demo" button) is the default; the official record only renders once
+    // the user acts. The Methodology page's validation detail for the real
+    // T3 submission is unconditional, since that page is specifically about
+    // the official record regardless of what the Analysis page is showing.
+    showStartState();
     lastExportPayload = window.WINDLENS_DATA;
-    renderCommercial(window.WINDLENS_DATA.assessment, window.WINDLENS_DATA.commercial);
     renderMethodologyDetail(window.WINDLENS_DATA.assessment);
     renderBaywaComparison(window.WINDLENS_DATA.baywa_comparison);
-    renderAnalysisNarrative(window.WINDLENS_DATA.baywa_comparison, window.WINDLENS_DATA.assessment);
     renderChart(window.WINDLENS_DATA.series);
   }
   catch (error) { document.querySelectorAll('.loading').forEach(el => { el.textContent = 'Could not load the local evidence record. Serve the repository root with: python -m http.server'; }); console.error(error); }
@@ -576,6 +705,15 @@ $('export-button').onclick = () => {
 window.addEventListener('hashchange', applyRoute);
 applyRoute();
 document.getElementById('truth-toggle')?.addEventListener('click', (event) => { chartTruthVisible = !chartTruthVisible; event.currentTarget.setAttribute('aria-pressed', String(chartTruthVisible)); event.currentTarget.textContent = chartTruthVisible ? 'Hide validation overlay' : 'Show validation overlay'; if (window.WINDLENS_DATA?.series) renderChart(window.WINDLENS_DATA.series); });
+
+document.querySelectorAll('.legend-toggle[data-line]').forEach((button) => {
+  button.addEventListener('click', (event) => {
+    const key = event.currentTarget.dataset.line;
+    overlayLineVisible[key] = !overlayLineVisible[key];
+    event.currentTarget.setAttribute('aria-pressed', String(overlayLineVisible[key]));
+    if (lastOverlayArgs) renderOverlayChart(...lastOverlayArgs);
+  });
+});
 
 boot();
 initUploadForm();

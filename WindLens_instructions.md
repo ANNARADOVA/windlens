@@ -1,3 +1,14 @@
+> **HISTORICAL DOCUMENT — NOT THE CURRENT PRODUCT SPECIFICATION**
+>
+> This was the original implementation brief. It contains earlier
+> Kelmarsh-first assumptions and historical architecture decisions that the
+> project has since moved past (the real BayWa r.e. challenge dataset
+> replaced Kelmarsh as the graded submission's data; the UI has been
+> restructured more than once since this was written). Use
+> `docs/PRODUCT_BRIEF.md` for the current BayWa-first product. Kept here
+> because it contains useful original constraints and framing that still
+> informed later decisions — see `docs/DECISION_LOG.md` for how.
+
 You are the senior engineer taking over an in-progress hackathon prototype called WindLens.
 
 Your job is to continue the work systematically, with production-quality engineering judgment, without turning it into a generic AI dashboard or a one-shot demo. Work in small, verified slices. Do not rewrite the application wholesale. Do not claim capabilities the system has not demonstrated.

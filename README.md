@@ -24,9 +24,34 @@ The graded record uses BayWa's own real challenge dataset (`data_hackathon_baywa
 6. Separately self-validate the method on a different, known window where real recorded wind exists to check against, and run the result through a review gate (input QA, reference/target alignment, tested wind-speed domain) before presenting it.
 7. Optionally convert lost kWh into an indicative financial value from a manually entered, clearly labeled illustrative price. This is never a settlement, contractual, or legal figure.
 
+## Upload workflow
+
+Upload the target turbine's own file (the one with the gap), at least one
+other turbine's file as a reference, and that target's power-curve file —
+all into one upload control; WindLens classifies each by its column
+headers, not by filename or a separate field. It detects every qualifying
+outage per turbine, reconstructs each one, and only ever estimates loss for
+detected targets — a reference turbine never gets its own loss figure. The
+result replaces the view in place, labeled clearly as your own run versus
+the official BayWa demo record; generate a report for whichever one you're
+currently looking at.
+
+## Two-page UI
+
+- **The Analysis page** — upload control, the live result (your own run or
+  the official demo), the outage-overlay chart, the editable indicative
+  price/financial impact, and report actions (PDF, email).
+- **The Methodology page** — full validation detail, limitations, and the
+  method itself. No price input or financial figure here — those are part
+  of the active result, not an explanation of the method (2026-10-24,
+  Anna's correction).
+
+Exact labels and routes live in `workspace/index.html`/`workspace/app.js`,
+authoritative over this paragraph if they ever diverge.
+
 ## Current verified state
 
-As of October 24, 2026, the full test suite is **193 tests, 193 pass**. Run with:
+As of October 24, 2026, the full test suite is **199 tests, 199 pass**. Run with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -q
@@ -54,11 +79,15 @@ The only third-party dependencies are pandas and numpy (plus openpyxl, for readi
 ## Repository layout
 
 - `src/windlens/` — the reconstruction, uncertainty, and review-gate pipeline, plus the upload tool and local server.
-- `tests/` — the test suite (193 tests, 193 pass; see "Current verified state" above).
+- `tests/` — the test suite (199 tests, 199 pass; see "Current verified state" above).
 - `data/` — raw source archives (including BayWa's real challenge data) and derived canonical datasets, with provenance manifests.
-- `workspace/` — the dependency-free evidence-first analyst workspace: two pages, **Result** (the live T3 record, with an upload form to run your own data) and **Methodology** (validation detail, the editable price, and report actions).
-- `docs/` — `DECISION_LOG.md` (the full, append-only history of decisions and results, including unsuccessful attempts and earlier proxy-farm validation work), and `HANDOVER.md` (the concise cross-session summary).
-- `WindLens_instructions.md` — the original challenge brief and product framing this prototype was built against.
+- `workspace/` — the dependency-free evidence-first analyst workspace: two pages, **Analysis** (the live result — the official demo or your own uploaded run — with the editable price and report actions) and **Methodology** (validation detail and the method itself only).
+- `docs/` — `PRODUCT_BRIEF.md` (the current product specification), `DATA_PROVENANCE.md` (current dataset provenance), `DECISION_LOG.md` (the full, append-only history of decisions and results, including unsuccessful attempts and earlier proxy-farm validation work), `HANDOVER.md` (the concise cross-session summary), and `archive/` (superseded documents, each marked historical).
+- `WindLens_instructions.md` — the original challenge brief this prototype was built against. Marked historical at the top of the file; see `docs/PRODUCT_BRIEF.md` for current product framing.
+
+## Documentation authority
+
+For current product behavior, use: (1) the current code and tests, (2) `docs/PRODUCT_BRIEF.md`, (3) this README, (4) `workspace/README.md`. Use `docs/DECISION_LOG.md`, audit/red-team reviews, and `docs/archive/` as historical evidence only — not current implementation instructions unless a task explicitly points to them.
 
 ## Running it locally
 

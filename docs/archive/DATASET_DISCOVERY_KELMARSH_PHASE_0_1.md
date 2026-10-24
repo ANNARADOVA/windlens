@@ -1,5 +1,12 @@
 # Dataset discovery — Phase 0/1
 
+> **HISTORICAL DOCUMENT — NOT THE CURRENT PRODUCT SPECIFICATION.** Written
+> before the real BayWa r.e. challenge data arrived, when Kelmarsh was the
+> only dataset available and no raw data had yet been downloaded. The
+> current product uses BayWa's own dataset — see `docs/PRODUCT_BRIEF.md` and
+> `docs/DATA_PROVENANCE.md`. Kept here as a record of the project's early
+> dataset-selection reasoning.
+
 ## Chosen case data
 
 **Kelmarsh wind farm data, v4** (Plumley & Takeuchi / Cubico Sustainable Investments), Zenodo DOI: https://doi.org/10.5281/zenodo.16807551

@@ -384,3 +384,4 @@ def reference_within_training_domain(
         "observations_out_of_domain": int(len(out_of_domain)),
         "within_domain": len(out_of_domain) == 0,
     }
+

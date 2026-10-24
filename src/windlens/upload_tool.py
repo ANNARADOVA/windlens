@@ -26,6 +26,7 @@ import io
 import re
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from windlens.loss_estimate import infer_interval_hours, integrate_energy_kwh
@@ -57,11 +58,13 @@ def _read_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(file_bytes))
 
 
-def load_wind_data(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Normalize an uploaded wind-data file (CSV or xlsx) to
-    timestamp_utc/turbine_id/wind_speed_ms, preserving NaN gaps as-is."""
+def _normalize_wind_data(raw: pd.DataFrame) -> pd.DataFrame:
+    """Normalize an already-parsed wind-data table to
+    timestamp_utc/turbine_id/wind_speed_ms, preserving NaN gaps as-is. Pure
+    transform, no file I/O -- split out of ``load_wind_data`` (2026-10-24 perf
+    fix) so a caller that has already parsed the file once (e.g. to classify
+    it) can normalize that same in-memory table instead of re-reading it."""
 
-    raw = _read_table(file_bytes, filename)
     rename = (
         CANONICAL_WIND_COLUMNS
         if set(CANONICAL_WIND_COLUMNS) <= set(raw.columns)
@@ -85,10 +88,18 @@ def load_wind_data(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return normalized.sort_values(["turbine_id", "timestamp_utc"]).reset_index(drop=True)
 
 
-def load_power_curve(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Normalize an uploaded power-curve file to bin_center_ms/mean_power_kw."""
+def load_wind_data(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Normalize an uploaded wind-data file (CSV or xlsx) to
+    timestamp_utc/turbine_id/wind_speed_ms, preserving NaN gaps as-is."""
 
-    raw = _read_table(file_bytes, filename)
+    return _normalize_wind_data(_read_table(file_bytes, filename))
+
+
+def _normalize_power_curve(raw: pd.DataFrame) -> pd.DataFrame:
+    """Normalize an already-parsed power-curve table to
+    bin_center_ms/mean_power_kw. Pure transform, no file I/O -- see
+    ``_normalize_wind_data`` for why this is split out."""
+
     rename = (
         CANONICAL_CURVE_COLUMNS
         if set(CANONICAL_CURVE_COLUMNS) <= set(raw.columns)
@@ -108,6 +119,12 @@ def load_power_curve(file_bytes: bytes, filename: str) -> pd.DataFrame:
     )
 
 
+def load_power_curve(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Normalize an uploaded power-curve file to bin_center_ms/mean_power_kw."""
+
+    return _normalize_power_curve(_read_table(file_bytes, filename))
+
+
 # A turbine's longest contiguous NaN run must reach at least this many rows before
 # it is treated as an outage target. Isolated single-row sensor dropouts (normal on
 # reference turbines too) are common and must NOT be mistaken for an outage -- that
@@ -115,6 +132,20 @@ def load_power_curve(file_bytes: bytes, filename: str) -> pd.DataFrame:
 # sit near the very start of the file, leaves too little pre-window history for
 # select_reference_turbine, crashing the whole run for no real reason.
 MIN_OUTAGE_RUN_LENGTH = 3
+
+# BayWa's own real challenge dataset ships these turbine ids as reference-pool
+# turbines ONLY -- never targets -- regardless of any data-quality gaps they may
+# have elsewhere in their own history. Confirmed against the real sample files
+# (2026-10-24, Anna, from a colleague's own analysis of this exact dataset): H1
+# has a genuine ~1.5-day gap in mid-July 2026 (two consecutive runs, 62 and 94
+# rows), unrelated to the official September test window, that a reference
+# implementation treats as a data-quality issue to interpolate from its park
+# neighbors -- not as an outage to report a loss for. Before this fix, auto-
+# detection had no way to know that and offered H1 as a "broken" target with
+# its own loss estimate, which is wrong for this dataset. A real user's OWN
+# uploaded data (different turbine ids) is unaffected -- this only excludes
+# the specific ids BayWa's own challenge data uses for its reference pool.
+KNOWN_REFERENCE_ONLY_TURBINE_IDS = {"H1", "H2", "H3", "H4", "H5", "O1", "O2"}
 
 
 def _nan_runs(series: pd.DataFrame) -> list[pd.DataFrame]:
@@ -169,10 +200,14 @@ def detect_outage_instances(wind_df: pd.DataFrame) -> list[dict[str, str]]:
     outage on the same turbine was silently invisible to auto-detection.)
 
     Each dict: {"target_turbine": ..., "window_start": ..., "window_end": ...}.
+    A turbine id in ``KNOWN_REFERENCE_ONLY_TURBINE_IDS`` never produces an
+    instance, regardless of its own internal gaps (2026-10-24 correctness fix).
     """
 
     instances: list[dict[str, str]] = []
     for turbine_id, group in wind_df.sort_values("timestamp_utc").groupby("turbine_id"):
+        if turbine_id in KNOWN_REFERENCE_ONLY_TURBINE_IDS:
+            continue
         series = group[["timestamp_utc", "wind_speed_ms"]].reset_index(drop=True)
         for run in _nan_runs(series):
             if len(run) >= MIN_OUTAGE_RUN_LENGTH:
@@ -222,6 +257,19 @@ def _candidate_references(wind_df: pd.DataFrame, target_turbine: str, detected_t
     return clean if clean else other_turbines
 
 
+def _classify_raw_table(raw: pd.DataFrame) -> str:
+    """Decide whether an already-parsed table is a wind-data table or a
+    power-curve table, from its own column headers. Returns "wind_data",
+    "power_curve", or "unknown". Pure transform, no file I/O."""
+
+    columns = set(raw.columns)
+    if set(CANONICAL_WIND_COLUMNS) <= columns or set(BAYWA_RAW_WIND_COLUMNS) <= columns:
+        return "wind_data"
+    if set(CANONICAL_CURVE_COLUMNS) <= columns or set(BAYWA_RAW_CURVE_COLUMNS) <= columns:
+        return "power_curve"
+    return "unknown"
+
+
 def classify_file_kind(file_bytes: bytes, filename: str) -> str:
     """Decide whether an uploaded file is a wind-data file or a power-curve file,
     from its own column headers -- so a user can drop every file into one box
@@ -230,13 +278,42 @@ def classify_file_kind(file_bytes: bytes, filename: str) -> str:
     several per-turbine data files plus one power-curve file, all selected
     together). Returns "wind_data", "power_curve", or "unknown"."""
 
+    return _classify_raw_table(_read_table(file_bytes, filename))
+
+
+def read_and_classify(file_bytes: bytes, filename: str) -> tuple[str, pd.DataFrame]:
+    """Parse an uploaded file's bytes exactly ONCE and return (kind, normalized
+    table) -- "wind_data" or "power_curve" tables come back already normalized
+    (timestamp_utc/turbine_id/wind_speed_ms, or bin_center_ms/mean_power_kw);
+    an "unknown" file's raw, un-normalized table comes back for error-message
+    purposes only.
+
+    2026-10-24 perf fix: the upload server previously called
+    ``classify_file_kind()`` (a full pandas parse) and then ``load_wind_data()``
+    or ``load_power_curve()`` (another full parse of the SAME bytes) separately
+    for every uploaded file. For BayWa's real 900KB+ per-turbine xlsx files,
+    each parse costs roughly a second, so a whole-farm upload of 10 turbine
+    files was silently paying for 20 parses instead of 10 -- the actual
+    measured cause of a 16s /run request that profiling had assumed was
+    reconstruction-side (the reconstruction itself took under 2s). This is the
+    single entry point that fixes it: one parse per uploaded file, period."""
+
     raw = _read_table(file_bytes, filename)
-    columns = set(raw.columns)
-    if set(CANONICAL_WIND_COLUMNS) <= columns or set(BAYWA_RAW_WIND_COLUMNS) <= columns:
-        return "wind_data"
-    if set(CANONICAL_CURVE_COLUMNS) <= columns or set(BAYWA_RAW_CURVE_COLUMNS) <= columns:
-        return "power_curve"
-    return "unknown"
+    kind = _classify_raw_table(raw)
+    if kind == "wind_data":
+        return kind, _normalize_wind_data(raw)
+    if kind == "power_curve":
+        return kind, _normalize_power_curve(raw)
+    return kind, raw
+
+
+def concat_wind_data_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Combine one or more already-normalized wind-data frames (e.g. from
+    ``read_and_classify``) into a single sorted frame -- the same combining
+    step ``load_wind_data_files`` does, split out so a caller that already has
+    normalized frames in hand doesn't have to re-read bytes to get one."""
+
+    return pd.concat(frames, ignore_index=True).sort_values(["turbine_id", "timestamp_utc"]).reset_index(drop=True)
 
 
 def load_wind_data_files(files: list[tuple[bytes, str]]) -> pd.DataFrame:
@@ -246,8 +323,7 @@ def load_wind_data_files(files: list[tuple[bytes, str]]) -> pd.DataFrame:
     real upload is commonly several of these files selected together, not one
     pre-combined file."""
 
-    frames = [load_wind_data(file_bytes, filename) for file_bytes, filename in files]
-    return pd.concat(frames, ignore_index=True).sort_values(["turbine_id", "timestamp_utc"]).reset_index(drop=True)
+    return concat_wind_data_frames([load_wind_data(file_bytes, filename) for file_bytes, filename in files])
 
 
 def describe_uploaded_files(
@@ -281,8 +357,14 @@ def describe_uploaded_files(
             described.append({"filename": filename, "kind": "wind_data", "error": str(exc)})
             continue
         turbines = sorted(df["turbine_id"].unique().tolist())
+        # A file is only previewed as a possible target if at least one of its
+        # turbines is NOT in the known BayWa reference-only pool (2026-10-24,
+        # matching detect_outage_instances()'s own exclusion -- otherwise this
+        # preview would contradict what /run actually selects, e.g. guessing
+        # H1 as a target from its own unrelated mid-July gap).
+        eligible = any(t not in KNOWN_REFERENCE_ONLY_TURBINE_IDS for t in turbines)
         longest_run = _longest_nan_run(df.sort_values("timestamp_utc")[["timestamp_utc", "wind_speed_ms"]])
-        has_gap = longest_run is not None and len(longest_run) >= MIN_OUTAGE_RUN_LENGTH
+        has_gap = eligible and longest_run is not None and len(longest_run) >= MIN_OUTAGE_RUN_LENGTH
         described.append(
             {
                 "filename": filename,
@@ -304,13 +386,24 @@ MAX_OVERLAY_POINTS = 400
 
 
 def _overlay_series(
-    wind_df: pd.DataFrame, target_turbine: str, reference_turbine: str, window_start: str, window_end: str
+    wind_df: pd.DataFrame,
+    target_turbine: str,
+    reference_turbine: str,
+    window_start: str,
+    window_end: str,
+    reconstruction: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
-    """Target's own actual readings (with its real gap) and the selected
-    reference's actual readings, over a window spanning as far before and
-    after the outage as the outage itself is long -- so the Result chart can
-    show the target's line, the reference overlaid, and the outage window
-    shaded, rather than only the predicted values during the gap."""
+    """Target's own actual readings (with its real gap), the selected
+    reference's actual readings, AND the model's reconstructed wind speed
+    during the outage window, over a window spanning as far before and after
+    the outage as the outage itself is long -- so the Result chart can show
+    all three together (target actual / reference actual / target
+    reconstructed), not just two, with the outage window shaded.
+
+    ``reconstruction`` (2026-10-24, a real gap Anna flagged: the chart showed
+    the gap but never the model's own output for it) is the same DataFrame
+    ``reconstruct_wind_speed()`` already returns -- passed in rather than
+    recomputed, since the caller has already built it."""
 
     duration = pd.Timestamp(window_end) - pd.Timestamp(window_start)
     margin_start = (pd.Timestamp(window_start) - duration).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -319,6 +412,11 @@ def _overlay_series(
     sliced = wind_df[(wind_df["timestamp_utc"] >= margin_start) & (wind_df["timestamp_utc"] < margin_end)]
     target = sliced[sliced["turbine_id"] == target_turbine].set_index("timestamp_utc")["wind_speed_ms"]
     reference = sliced[sliced["turbine_id"] == reference_turbine].set_index("timestamp_utc")["wind_speed_ms"]
+    reconstructed = (
+        reconstruction.set_index("timestamp_utc")["wind_speed_ms_reconstructed"]
+        if reconstruction is not None and not reconstruction.empty
+        else pd.Series(dtype=float)
+    )
     timestamps = sorted(set(target.index) | set(reference.index))
     if len(timestamps) > MAX_OVERLAY_POINTS:
         step = max(1, len(timestamps) // MAX_OVERLAY_POINTS)
@@ -328,15 +426,126 @@ def _overlay_series(
     for ts in timestamps:
         t_val = target.get(ts)
         r_val = reference.get(ts)
+        p_val = reconstructed.get(ts)
         points.append(
             {
                 "timestamp_utc": ts,
                 "target_ms": None if pd.isna(t_val) else float(t_val),
                 "reference_ms": None if pd.isna(r_val) else float(r_val),
+                "reconstructed_ms": None if p_val is None or pd.isna(p_val) else float(p_val),
                 "in_outage": bool(window_start <= ts < window_end),
             }
         )
     return points
+
+
+def _find_clean_validation_window(
+    wind_df: pd.DataFrame,
+    target_turbine: str,
+    reference_turbine: str,
+    window_start: str,
+    window_end: str,
+) -> tuple[str, str] | None:
+    """Find ONE same-duration window elsewhere in the upload where the target
+    has a complete, gap-free run of real readings (so there's ground truth to
+    check against) and the reference has at least some coverage. Tries right
+    after the outage window first (the same shape the official BayWa record's
+    own shown-window self-validation uses), then right before it. Returns
+    None if neither side has a clean window -- never fabricates one.
+
+    2026-10-24, Anna, high priority: a live upload previously had no accuracy
+    figure at all for its own outage (by construction -- there's no ground
+    truth for the actual gap). This finds a SINGLE extra window to check
+    instead, deliberately bounded to one reconstruction run, not a loop over
+    many historical blocks (the full-period backtest tried and reverted
+    earlier this session over a measured 2x /run slowdown)."""
+
+    duration = pd.Timestamp(window_end) - pd.Timestamp(window_start)
+    target_rows = wind_df[wind_df["turbine_id"] == target_turbine]
+
+    for candidate_start, candidate_end in (
+        (window_end, (pd.Timestamp(window_end) + duration).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        ((pd.Timestamp(window_start) - duration).strftime("%Y-%m-%dT%H:%M:%SZ"), window_start),
+    ):
+        in_window = target_rows[
+            (target_rows["timestamp_utc"] >= candidate_start) & (target_rows["timestamp_utc"] < candidate_end)
+        ]
+        if in_window.empty or in_window["wind_speed_ms"].isna().any():
+            continue
+        reference_in_window = wind_df[
+            (wind_df["turbine_id"] == reference_turbine)
+            & (wind_df["timestamp_utc"] >= candidate_start)
+            & (wind_df["timestamp_utc"] < candidate_end)
+        ]["wind_speed_ms"].dropna()
+        if reference_in_window.empty:
+            continue
+        return candidate_start, candidate_end
+    return None
+
+
+def _self_validate(
+    wind_df: pd.DataFrame,
+    target_turbine: str,
+    reference_turbine: str,
+    window_start: str,
+    window_end: str,
+    power_curve_df: pd.DataFrame | None,
+    interval_hours: float | None,
+) -> dict[str, Any] | None:
+    """Run the SAME reconstruction on one clean validation window (see
+    ``_find_clean_validation_window``) and compare it to the real readings
+    there, to give a live upload an honest accuracy figure for its own data
+    -- not just a cross-reference to the official record's n=3 targets.
+    Returns None (never a fabricated number) if no clean window exists."""
+
+    found = _find_clean_validation_window(wind_df, target_turbine, reference_turbine, window_start, window_end)
+    if found is None:
+        return None
+    check_start, check_end = found
+
+    try:
+        reconstruction = reconstruct_wind_speed(wind_df, target_turbine, reference_turbine, check_start, check_end)
+    except ValueError:
+        return None
+    if reconstruction.empty:
+        return None
+
+    actual = (
+        wind_df[
+            (wind_df["turbine_id"] == target_turbine)
+            & (wind_df["timestamp_utc"] >= check_start)
+            & (wind_df["timestamp_utc"] < check_end)
+        ]
+        .set_index("timestamp_utc")["wind_speed_ms"]
+    )
+    paired = pd.concat(
+        [actual.rename("actual"), reconstruction.set_index("timestamp_utc")["wind_speed_ms_reconstructed"].rename("predicted")],
+        axis=1,
+        join="inner",
+    ).dropna()
+    if paired.empty:
+        return None
+
+    wind_residuals = paired["actual"].to_numpy(dtype=float) - paired["predicted"].to_numpy(dtype=float)
+    result: dict[str, Any] = {
+        "window_utc": [check_start, check_end],
+        "wind_rmse_ms": float(np.sqrt(np.mean(wind_residuals**2))),
+        "wind_mae_ms": float(np.mean(np.abs(wind_residuals))),
+        "n_observations": int(len(paired)),
+    }
+
+    if power_curve_df is not None and interval_hours is not None:
+        actual_power = apply_power_curve(power_curve_df, paired["actual"].to_numpy(dtype=float))
+        predicted_power = apply_power_curve(power_curve_df, paired["predicted"].to_numpy(dtype=float))
+        power_residuals = actual_power - predicted_power
+        result["power_rmse_kw"] = float(np.sqrt(np.mean(power_residuals**2)))
+        result["power_mae_kw"] = float(np.mean(np.abs(power_residuals)))
+        actual_kwh = integrate_energy_kwh(actual_power, interval_hours=interval_hours)
+        predicted_kwh = integrate_energy_kwh(predicted_power, interval_hours=interval_hours)
+        if actual_kwh:
+            result["energy_relative_error_pct"] = abs(actual_kwh - predicted_kwh) / actual_kwh * 100.0
+
+    return result
 
 
 def _find_power_curve_for_target(
@@ -400,6 +609,18 @@ def run_pipeline(
     for EACH target rather than applying one curve to every target. ``power_curve_df``
     alone remains for the simple single-target/single-curve case (used directly by
     callers that already know there is exactly one curve for exactly one target)."""
+
+    # 2026-10-24: a manual window needs BOTH bounds to mean anything -- silently
+    # falling back to auto-detection when only one was typed (e.g. a user fills in
+    # the start field, changes their mind, and clears it, or a form bug drops one
+    # field) would run a different reconstruction than what they asked for with no
+    # indication anything was ignored.
+    if bool(manual_start) != bool(manual_end):
+        raise ValueError(
+            "Both a manual outage-window start AND end are required together -- "
+            f"received only {'a start' if manual_start else 'an end'}. Provide both, "
+            "or leave both blank to auto-detect."
+        )
 
     uploaded_turbines = wind_df["turbine_id"].nunique()
     if uploaded_turbines < 2:
@@ -529,7 +750,9 @@ def run_pipeline(
             "domain_check": domain_check,
             "inferred_cadence_minutes": inferred_cadence_minutes,
             "reference_fallback_note": selection.get("reference_fallback_note"),
-            "overlay_series": _overlay_series(wind_df, target_turbine, selected_reference, window_start, window_end),
+            "overlay_series": _overlay_series(
+                wind_df, target_turbine, selected_reference, window_start, window_end, reconstruction
+            ),
             "raw_reconstruction_notice": (
                 "This is a raw reconstruction from your uploaded data, not validated "
                 "against ground truth for this event -- the same evidence standard as "
@@ -572,6 +795,16 @@ def run_pipeline(
                     "The reference turbine's timestamps are too irregular to infer a "
                     "reliable sampling interval, so energy could not be integrated."
                 )
+
+        # One bounded extra reconstruction run on a clean, same-duration window
+        # elsewhere in this same upload (2026-10-24, Anna, high priority: a live
+        # upload previously had no wind/power error figure at all, unlike the
+        # official record). Deliberately a SINGLE window, not a historical loop --
+        # see _self_validate()'s docstring for why.
+        entry["self_validation"] = _self_validate(
+            wind_df, target_turbine, selected_reference, window_start, window_end,
+            target_power_curve_df, interval_hours,
+        )
 
         results.append(entry)
 

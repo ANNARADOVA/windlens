@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -9,8 +10,11 @@ from windlens.upload_tool import (
     describe_uploaded_files,
     detect_outage_instances,
     detect_target_turbines,
+    load_wind_data,
     run_pipeline,
 )
+
+REAL_SAMPLE_DIR = Path(__file__).resolve().parents[1] / "data_hackathon_baywa_re (1)"
 
 
 def _synthetic_wind_df(gap: bool) -> pd.DataFrame:
@@ -98,6 +102,21 @@ class RunPipelineManualWindowRescueTests(unittest.TestCase):
         target_entry = next(t for t in result["targets"] if t["target_turbine"] == "TARGET")
         self.assertTrue(target_entry["window_auto_detected"])
 
+    def test_only_a_manual_start_with_no_end_is_rejected_not_silently_auto_detected(self) -> None:
+        # 2026-10-24: a lone manual bound must be a clear error, not a silent
+        # fall-through to a different (auto-detected) reconstruction than what
+        # was actually asked for.
+        df = _synthetic_wind_df(gap=True)
+        with self.assertRaises(ValueError) as ctx:
+            run_pipeline(df, power_curve_df=None, manual_start="2026-01-01T06:40:00Z")
+        self.assertIn("Both a manual outage-window start AND end are required together", str(ctx.exception))
+
+    def test_only_a_manual_end_with_no_start_is_rejected_not_silently_auto_detected(self) -> None:
+        df = _synthetic_wind_df(gap=True)
+        with self.assertRaises(ValueError) as ctx:
+            run_pipeline(df, power_curve_df=None, manual_end="2026-01-01T07:30:00Z")
+        self.assertIn("Both a manual outage-window start AND end are required together", str(ctx.exception))
+
 
 class DetectOutageInstancesTests(unittest.TestCase):
     def test_one_turbine_with_two_separate_gaps_produces_two_independently_correct_instances(self) -> None:
@@ -162,6 +181,56 @@ class DetectOutageInstancesTests(unittest.TestCase):
             rows.append((ts, "REF", v))
         wind_df = pd.DataFrame(rows, columns=["timestamp_utc", "turbine_id", "wind_speed_ms"])
         self.assertEqual(detect_target_turbines(wind_df), ["TARGET"])
+
+
+class RealSampleReferencePoolExclusionTests(unittest.TestCase):
+    """2026-10-24 correctness fix: in BayWa's own real challenge dataset,
+    H1-H5 and O1-O2 are reference-pool turbines ONLY, never targets --
+    regardless of any data-quality gaps they may have elsewhere in their own
+    history (Anna, from a colleague's own analysis of this exact dataset).
+    H1's real file has a genuine ~1.5-day gap in mid-July 2026 that, before
+    this fix, auto-detection wrongly offered as a "broken" target with its
+    own loss estimate. Uses the real sample file directly -- not a
+    synthesized scenario -- per the explicit instruction not to fake what
+    the real data already demonstrates."""
+
+    def test_h1s_own_real_mid_july_gap_is_never_classified_as_a_target(self) -> None:
+        h1_path = REAL_SAMPLE_DIR / "H1_data.xlsx"
+        if not h1_path.exists():
+            self.skipTest(f"Real sample file not present at {h1_path}")
+        df = load_wind_data(h1_path.read_bytes(), "H1_data.xlsx")
+        # Confirm the real gap is actually there (i.e. this test would have
+        # failed before the fix, not vacuously passed on empty data).
+        self.assertTrue(df["wind_speed_ms"].isna().any())
+        self.assertEqual(detect_target_turbines(df), [])
+        self.assertEqual(detect_outage_instances(df), [])
+
+    def test_t1_a_real_target_still_correctly_classified_alongside_h1(self) -> None:
+        t1_path = REAL_SAMPLE_DIR / "T1_data.xlsx"
+        h1_path = REAL_SAMPLE_DIR / "H1_data.xlsx"
+        if not t1_path.exists() or not h1_path.exists():
+            self.skipTest("Real sample files not present")
+        combined = pd.concat(
+            [
+                load_wind_data(t1_path.read_bytes(), "T1_data.xlsx"),
+                load_wind_data(h1_path.read_bytes(), "H1_data.xlsx"),
+            ],
+            ignore_index=True,
+        )
+        self.assertEqual(detect_target_turbines(combined), ["T1"])
+        instances = detect_outage_instances(combined)
+        self.assertTrue(all(i["target_turbine"] == "T1" for i in instances))
+        self.assertTrue(instances)
+
+    def test_describe_uploaded_files_previews_h1_as_reference_not_target(self) -> None:
+        h1_path = REAL_SAMPLE_DIR / "H1_data.xlsx"
+        if not h1_path.exists():
+            self.skipTest(f"Real sample file not present at {h1_path}")
+        described = describe_uploaded_files(
+            wind_data_items=[(h1_path.read_bytes(), "H1_data.xlsx")], power_curve_items=[]
+        )
+        self.assertEqual(len(described), 1)
+        self.assertIn("reference candidate", described[0]["role_guess"])
 
 
 class RunPipelineCadenceTests(unittest.TestCase):
@@ -241,6 +310,23 @@ class RunPipelineCadenceTests(unittest.TestCase):
         self.assertTrue(any(p["reference_ms"] is not None for p in in_outage_points))
         outside_points = [p for p in overlay if not p["in_outage"]]
         self.assertTrue(any(p["target_ms"] is not None for p in outside_points))
+
+    def test_overlay_series_includes_the_models_own_reconstructed_line_during_the_gap(self) -> None:
+        # 2026-10-24: Anna flagged a real gap -- the overlay chart showed the
+        # target's gap and the reference's continuity through it, but never
+        # the model's own reconstructed output for the gap, which is the
+        # actual core output of the tool. In-outage points must carry a
+        # reconstructed_ms value; outside the outage (where nothing was
+        # reconstructed) it must be None, not a stray leftover value.
+        df = _synthetic_wind_df(gap=True)
+        result = run_pipeline(df, power_curve_df=None)
+        target_entry = next(t for t in result["targets"] if t["target_turbine"] == "TARGET")
+
+        overlay = target_entry["overlay_series"]
+        in_outage_points = [p for p in overlay if p["in_outage"]]
+        outside_points = [p for p in overlay if not p["in_outage"]]
+        self.assertTrue(all(p["reconstructed_ms"] is not None for p in in_outage_points))
+        self.assertTrue(all(p["reconstructed_ms"] is None for p in outside_points))
 
 
 class RunPipelineMultiTargetPowerCurveTests(unittest.TestCase):
@@ -342,6 +428,39 @@ class DescribeUploadedFilesTests(unittest.TestCase):
         )
         self.assertEqual(len(described), 1)
         self.assertIn("error", described[0])
+
+
+class SelfValidationTests(unittest.TestCase):
+    """2026-10-24, Anna, high priority: a live upload previously had no wind/
+    power error figure at all for its own run, unlike the official record --
+    run_pipeline() now finds one clean, same-duration window elsewhere in the
+    SAME upload (not a historical loop -- see upload_tool.py's
+    _self_validate() docstring) and reports real error figures from it."""
+
+    def test_real_upload_gets_a_real_self_validation_figure(self) -> None:
+        t1_path = REAL_SAMPLE_DIR / "T1_data.xlsx"
+        o1_path = REAL_SAMPLE_DIR / "O1_data.xlsx"
+        curve_path = REAL_SAMPLE_DIR / "T1_power_curve.xlsx"
+        if not (t1_path.exists() and o1_path.exists() and curve_path.exists()):
+            self.skipTest("Real sample files not present")
+        combined = pd.concat(
+            [
+                load_wind_data(t1_path.read_bytes(), "T1_data.xlsx"),
+                load_wind_data(o1_path.read_bytes(), "O1_data.xlsx"),
+            ],
+            ignore_index=True,
+        ).sort_values(["turbine_id", "timestamp_utc"]).reset_index(drop=True)
+
+        result = run_pipeline(combined, power_curve_items=[(curve_path.read_bytes(), "T1_power_curve.xlsx")])
+        targets = [t for t in result["targets"] if t.get("self_validation")]
+        self.assertTrue(targets, "expected at least one instance to find a clean validation window")
+        sv = targets[0]["self_validation"]
+        self.assertIn("window_utc", sv)
+        self.assertGreater(sv["wind_rmse_ms"], 0)
+        self.assertGreater(sv["n_observations"], 0)
+        # The validation window must be real ground truth, never the instance's
+        # own outage window (that would defeat the entire point).
+        self.assertNotEqual(sv["window_utc"], targets[0]["outage_window_utc"])
 
 
 if __name__ == "__main__":
