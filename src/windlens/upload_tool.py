@@ -448,38 +448,55 @@ def _find_clean_validation_window(
 ) -> tuple[str, str] | None:
     """Find ONE same-duration window elsewhere in the upload where the target
     has a complete, gap-free run of real readings (so there's ground truth to
-    check against) and the reference has at least some coverage. Tries right
-    after the outage window first (the same shape the official BayWa record's
-    own shown-window self-validation uses), then right before it. Returns
-    None if neither side has a clean window -- never fabricates one.
+    check against) and the reference has at least some coverage. Steps
+    outward from the outage window -- first one window-length after it, then
+    one before, then two after, two before, and so on -- so a gap-riddled
+    neighbourhood right next to the outage doesn't block finding a clean
+    window further out in a longer upload. Returns None only if NOTHING in
+    the whole file qualifies -- never fabricates a number.
 
     2026-10-24, Anna, high priority: a live upload previously had no accuracy
     figure at all for its own outage (by construction -- there's no ground
     truth for the actual gap). This finds a SINGLE extra window to check
     instead, deliberately bounded to one reconstruction run, not a loop over
     many historical blocks (the full-period backtest tried and reverted
-    earlier this session over a measured 2x /run slowdown)."""
+    earlier this session over a measured 2x /run slowdown). Checking many
+    candidate positions is cheap (a boolean mask + isna check each); only the
+    one window that's actually found gets reconstructed.
+    2026-10-24 (later same day): widened from just the immediately-adjacent
+    window to stepping outward, after Anna reported a real upload still
+    coming back with no self-validation figure -- a single local gap next to
+    the outage was enough to block the original immediate-neighbour-only
+    search even when the rest of the file had plenty of clean data."""
 
     duration = pd.Timestamp(window_end) - pd.Timestamp(window_start)
     target_rows = wind_df[wind_df["turbine_id"] == target_turbine]
+    earliest = pd.Timestamp(target_rows["timestamp_utc"].min()) if not target_rows.empty else None
+    latest = pd.Timestamp(target_rows["timestamp_utc"].max()) if not target_rows.empty else None
 
-    for candidate_start, candidate_end in (
-        (window_end, (pd.Timestamp(window_end) + duration).strftime("%Y-%m-%dT%H:%M:%SZ")),
-        ((pd.Timestamp(window_start) - duration).strftime("%Y-%m-%dT%H:%M:%SZ"), window_start),
-    ):
-        in_window = target_rows[
-            (target_rows["timestamp_utc"] >= candidate_start) & (target_rows["timestamp_utc"] < candidate_end)
-        ]
-        if in_window.empty or in_window["wind_speed_ms"].isna().any():
-            continue
-        reference_in_window = wind_df[
-            (wind_df["turbine_id"] == reference_turbine)
-            & (wind_df["timestamp_utc"] >= candidate_start)
-            & (wind_df["timestamp_utc"] < candidate_end)
-        ]["wind_speed_ms"].dropna()
-        if reference_in_window.empty:
-            continue
-        return candidate_start, candidate_end
+    for step in range(1, 25):
+        candidates = (
+            (pd.Timestamp(window_end) + duration * (step - 1), pd.Timestamp(window_end) + duration * step),
+            (pd.Timestamp(window_start) - duration * step, pd.Timestamp(window_start) - duration * (step - 1)),
+        )
+        for start_ts, end_ts in candidates:
+            if earliest is not None and (end_ts <= earliest or start_ts >= latest):
+                continue
+            candidate_start = start_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+            candidate_end = end_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+            in_window = target_rows[
+                (target_rows["timestamp_utc"] >= candidate_start) & (target_rows["timestamp_utc"] < candidate_end)
+            ]
+            if in_window.empty or in_window["wind_speed_ms"].isna().any():
+                continue
+            reference_in_window = wind_df[
+                (wind_df["turbine_id"] == reference_turbine)
+                & (wind_df["timestamp_utc"] >= candidate_start)
+                & (wind_df["timestamp_utc"] < candidate_end)
+            ]["wind_speed_ms"].dropna()
+            if reference_in_window.empty:
+                continue
+            return candidate_start, candidate_end
     return None
 
 

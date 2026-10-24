@@ -51,7 +51,7 @@ authoritative over this paragraph if they ever diverge.
 
 ## Current verified state
 
-As of October 24, 2026, the full test suite is **199 tests, 199 pass**. Run with:
+As of October 24, 2026, the full test suite is **217 tests, 217 pass**. Run with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -q
@@ -64,22 +64,21 @@ The only third-party dependencies are pandas and numpy (plus openpyxl, for readi
 - **The hidden-window prediction (T3, 2026-09-01 to 2026-09-04) has no ground truth to check against, by construction.** That is what makes it the real graded submission rather than a validated estimate — its accuracy is supported only by the separate self-validation on a different, known window.
 - **Reference selection is pure behavioral correlation.** No turbine-location/geography registry exists for this dataset, so geographic proximity between target and reference is not verified, only inferred from how well their historical readings correlate.
 - **Self-validation "truth" is a power-curve-derived proxy, not an independent power measurement.** No BayWa source file for any turbine contains a power column — shown-window "truth" power is the measured power curve applied to the real, shown wind-speed reading.
-- **No calibrated uncertainty interval exists yet for this pipeline.** The kWh range shown is an observed-error bracket across the 3 real validation targets (n=3), not a statistical confidence interval; the review gate marks this "not evaluated" rather than claiming a coverage figure it hasn't earned.
+- **No guaranteed statistical confidence interval exists yet for this pipeline.** The kWh range shown is an observed-error bracket across the 3 real validation targets (n=3), using the worst (largest) of the three errors as a deliberately conservative bound — not a statistical confidence interval; the review gate marks this "not evaluated" rather than claiming a coverage figure it hasn't earned.
 - **This is not an outage-cause detector.** The tool estimates lost production; it does not and currently cannot distinguish a real mechanical outage from a sensor fault or other benign data gap — confirm the cause independently before relying on the number.
 - **Commercial output is indicative only.** The kWh-to-currency conversion uses a manually entered, clearly labeled illustrative price and carries no settlement, contractual, regulatory, or legal weight.
 - **This is a hackathon prototype**, not production software. It has not been reviewed for production security, scaling, or operational hardening.
 
 ## Future opportunities (not part of this submission's evidence)
 
-- Before the real BayWa data arrived, we explored validating this same reconstruction method on public wind farms (Kelmarsh, Penmanshiel, Hill of Towie) at a range of target-reference distances, and on how a turbine-location registry (geographic proximity, not just behavioral correlation) might change reference selection — both remain open directions, not part of this submission's evidence. Full history in `docs/DECISION_LOG.md`, `docs/METHOD_BAKEOFF_2026-10-23.md`, and `docs/REDTEAM_2026-10-23_adversarial_review.md`.
-- A calibrated uncertainty interval for the real BayWa pipeline, once enough held-out BayWa data exists to build one.
+- A reliable, guaranteed confidence interval for the real BayWa pipeline, once enough held-out BayWa data exists to build one.
 - Automatic outage-cause classification.
-- Support for a genuine neighbouring-farm scenario once two real, nearby, overlapping farms are available to test against.
+- A multi-turbine machine-learning ensemble, if accuracy on harder targets outweighs its added complexity and run time (more accurate on one real target, comparable on the other two, but ~30-90x slower — see `docs/DECISION_LOG.md`).
 
 ## Repository layout
 
 - `src/windlens/` — the reconstruction, uncertainty, and review-gate pipeline, plus the upload tool and local server.
-- `tests/` — the test suite (199 tests, 199 pass; see "Current verified state" above).
+- `tests/` — the test suite (217 tests, 217 pass; see "Current verified state" above).
 - `data/` — raw source archives (including BayWa's real challenge data) and derived canonical datasets, with provenance manifests.
 - `workspace/` — the dependency-free evidence-first analyst workspace: two pages, **Analysis** (the live result — the official demo or your own uploaded run — with the editable price and report actions) and **Methodology** (validation detail and the method itself only).
 - `docs/` — `PRODUCT_BRIEF.md` (the current product specification), `DATA_PROVENANCE.md` (current dataset provenance), `DECISION_LOG.md` (the full, append-only history of decisions and results, including unsuccessful attempts and earlier proxy-farm validation work), `HANDOVER.md` (the concise cross-session summary), and `archive/` (superseded documents, each marked historical).

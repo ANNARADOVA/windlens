@@ -4378,3 +4378,26 @@ Anna's explicit framing: "this run should be final text rephrase, we want to hav
 - Removed "Live run on your data — not independently reviewed" fallback text from Review status for live uploads (now blank/dash, matching the official record's own unset state).
 
 **Verification:** 217/217 tests pass. All 3 check scripts clean. `node --check` clean. Live-verified via a real synthetic upload through fetch('/run') and the actual render pipeline (not a mock): confirmed real wind/power error figures render with the "(checked on a different window with known data)" clarification, confirmed the energy-loss number renders next to the cumulative chart, confirmed the legend/review-status/evidence-section wording all changed as intended. Confirmed zero console errors on a FRESH tab (a stale 400 from earlier test traffic in a reused tab was investigated and confirmed unrelated to this round's changes). Cache-bust at `20261024x`.
+
+---
+
+## 2026-10-24: Self-validation search widened (was still falling back to "not computable" for some uploads); last remaining jargon removed
+
+Anna, urgent, with a pasted screenshot showing the "Not computable... n=3 backtest" fallback text still appearing for a real upload: "has to have DATA!!!!!!" Root cause: `_find_clean_validation_window()` only checked the ONE window immediately adjacent to the outage (right after, then right before) -- a single local gap right next to the outage was enough to block it even when the rest of the file had plenty of clean data elsewhere. Widened to step outward (one window-length after, one before, two after, two before, ... up to 24 steps), still cheap (each candidate is a boolean mask + isna check; only the one window actually found gets reconstructed). Confirmed fix against T1's real data, which previously had exactly this problem (one of its two outage instances returned no validation window before, both do now). Whole-farm `run_pipeline` timing unaffected (2.0s, same ballpark as before). Also removed "Your own upload — not independently reviewed" from the Accuracy-at-a-glance subtitle (now just "Your own upload"), the last remaining instance of that phrasing Anna flagged.
+
+**Verification:** 217/217 tests pass. `check_demo_copy.py` clean. Live-verified via a real upload through the actual render pipeline: wind-speed error, power deviation, and energy deviation all now show real numbers with the "(checked on a different window with known data)" note, zero console errors. Cache-bust at `20261024y`.
+
+Relayed to the coordinating session in parallel: Anna asked for the repo to be on GitHub and made public to share with the jury -- this session has no git access (not a git repository here), so that request was handed off rather than attempted.
+
+---
+
+## 2026-10-24: Stale content found and fixed in README.md and other public-facing docs
+
+Anna asked directly, with the repo about to go public to the jury: "did u make sure that the readme and other files have no stale data." Had not checked -- this session's work was entirely in `workspace/`/`src/`/`tests/`. Checked now and found real issues in the docs README.md itself names as authoritative:
+
+- **README.md's own test count was wrong**: said "199 tests, 199 pass" in two places; actual current count is 217 (verified by running the suite). A jury member running the suite themselves would have immediately seen a mismatch. Fixed both occurrences.
+- **"calibrated" jargon** still present in README.md (x2), `docs/PRODUCT_BRIEF.md`, and `workspace/README.md` -- the exact word Anna asked removed from the app itself earlier this session, never swept from the docs. Reworded all four to "guaranteed statistical confidence interval" / "not a calibrated ... interval" -> "not a guaranteed statistical confidence interval", consistent with the app's own current wording, and added the same "worst of the three, a conservative bound" precision Anna asked for in the app's Limitations text.
+- **Stale pre-BayWa-data backstory** in README.md's "Future opportunities" section (Kelmarsh/Penmanshiel/Hill of Towie exploration, turbine-location registry) and a stale "neighbouring-farm scenario" next-step -- both already identified as stale and removed from the Methodology page in the app itself (per Anna's "isn't this stale" question), but never removed from README.md. Removed the backstory bullet; replaced the neighbouring-farm bullet with the real, current "multi-turbine ensemble" next-step already in the app.
+- **`docs/DATA_PROVENANCE.md` and `WindLens_instructions.md` left untouched** -- these ARE legitimately historical/provenance records (the former documents where every dataset this project ever used came from, including pre-BayWa phases; the latter is explicitly marked "HISTORICAL DOCUMENT — NOT THE CURRENT PRODUCT SPECIFICATION" at its own top). Mentioning Kelmarsh there is accurate record-keeping, not a stale claim about current behavior -- different from the README's "Future opportunities" section, which was presenting old backstory as if still forward-looking.
+
+**Verification:** grepped README.md, `workspace/README.md`, and `docs/PRODUCT_BRIEF.md` afterward for "calibrat" and "199" -- clean. Did not re-run the full test/check-script suite for this round since no application code changed, only documentation.

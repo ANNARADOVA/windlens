@@ -89,9 +89,9 @@ A telemetry gap alone does not prove a physical or generation outage —
 WindLens estimates the lost production if there was one; confirming the
 actual cause (mechanical failure, sensor fault, grid curtailment, or
 something else) is on you, from evidence outside this tool. The kWh range
-shown is an observed-error bracket, not a calibrated statistical confidence
-interval. Nothing here is a settlement, contractual, regulatory, or legal
-figure.
+shown is an observed-error bracket, using the worst observed error as a
+conservative bound — not a guaranteed statistical confidence interval.
+Nothing here is a settlement, contractual, regulatory, or legal figure.
 
 ## Regenerating the official record
 

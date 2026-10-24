@@ -255,7 +255,7 @@ function renderResultView(vm) {
         ? `Not computable for this window (no recorded truth exists) — ranges ${fmt(svc.energyErrMin, 1)}–${fmt(svc.energyErrMax, 1)}% across the n=${svc.n} real validation targets (see Methodology)`
         : 'Not applicable — no ground truth for this window, by construction';
   }
-  if ($('gate-count')) $('gate-count').textContent = vm.source === 'official' ? 'Real BayWa T3 submission' : 'Your own upload — not independently reviewed';
+  if ($('gate-count')) $('gate-count').textContent = vm.source === 'official' ? 'Real BayWa T3 submission' : 'Your own upload';
 
   renderCommercialPanel(vm);
   renderOverlayChart(vm.overlaySeries, vm.windowStartUtc, vm.windowEndUtc);

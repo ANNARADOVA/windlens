@@ -160,9 +160,10 @@ until that result has finished calculating. See the live code
 - Self-validation "truth" is a power-curve-derived proxy from real wind
   readings, not an independent power measurement — no BayWa file contains a
   power column.
-- No calibrated uncertainty interval exists for this pipeline yet. The kWh
-  range shown is an observed-error bracket across 3 real validation targets
-  (n=3), not a statistical confidence interval.
+- No guaranteed statistical confidence interval exists for this pipeline yet.
+  The kWh range shown is an observed-error bracket across 3 real validation
+  targets (n=3), using the worst of the three as a conservative bound, not a
+  statistical confidence interval.
 - This is not an outage-cause detector. A telemetry gap alone does not prove
   a physical or generation outage — confirm the cause independently.
 - Commercial output is indicative only, from a manually entered demo price —
