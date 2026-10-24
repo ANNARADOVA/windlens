@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WindLens registry import report",
+  "type": "object",
+  "required": [
+    "report_version",
+    "source_filename",
+    "source_md5",
+    "accepted_rows",
+    "rejected_rows",
+    "farm_ids",
+    "turbine_ids",
+    "quality_status",
+    "usable_for_geo_selection",
+    "issues"
+  ],
+  "properties": {
+    "report_version": {"const": "registry-import.v1"},
+    "source_filename": {"type": "string", "minLength": 1},
+    "source_md5": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "accepted_rows": {"type": "integer", "minimum": 1},
+    "rejected_rows": {"type": "integer", "minimum": 0},
+    "farm_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "turbine_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "quality_status": {"enum": ["verified", "needs_review"]},
+    "usable_for_geo_selection": {"type": "boolean"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["row", "code", "message"],
+        "properties": {
+          "row": {"type": "integer", "minimum": 2},
+          "code": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    }
+  }
+}

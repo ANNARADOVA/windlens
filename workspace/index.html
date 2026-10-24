@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WindLens / Evidence workspace</title>
+    <link rel="stylesheet" href="./styles.css?v=20261023e" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">↗</span>
+          <div><span class="brand-name">WindLens</span><span class="brand-sub">evidence terminal</span></div>
+        </div>
+        <nav class="primary-nav" aria-label="Primary navigation">
+          <a class="nav-item active" href="#overview"><span class="nav-index">01</span>Result</a>
+          <a class="nav-item" href="#analysis"><span class="nav-index">02</span>Why to trust it</a>
+          <a class="nav-item" href="#method"><span class="nav-index">03</span>How it works</a>
+          <a class="nav-item" href="#upload"><span class="nav-index">04</span>Run your own data</a>
+        </nav>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div><span class="eyebrow">Performance review / assessment 001</span><h1>Outage reconstruction</h1><p class="topbar-summary">WindLens estimates missing turbine production from a behaviorally selected reference turbine, then checks it against available evidence before you rely on it.</p></div>
+          <div class="topbar-actions"><span class="data-stamp">LOCAL EVIDENCE RECORD</span><button id="export-button" class="quiet-button">Download assessment record <span>↗</span></button><button id="insurance-report-button" class="quiet-button" title="A short, insurer-ready outage-loss report for this record — written for a risk/reinsurance reviewer, grounded entirely in these real numbers.">Generate insurance report <span>↗</span></button></div>
+        </header>
+
+        <section id="insurance-report-panel" class="panel insurance-report-panel" hidden>
+          <div class="section-heading"><div><span class="eyebrow">For a risk / reinsurance reviewer</span><h2>Insurance-facing outage-loss report</h2></div><button id="insurance-report-close" class="quiet-button" type="button">Close</button></div>
+          <p class="small-note">A short, plain-language summary of this outage's estimated energy and financial loss, suitable for attaching to a claim — every number in it is pulled directly from this real assessment, not re-entered or rounded.</p>
+          <pre id="insurance-report-text" class="insurance-report-text"></pre>
+          <div class="insurance-report-actions">
+            <button id="insurance-report-download-pdf" class="quiet-button" type="button">Download report (PDF)</button>
+            <button id="insurance-report-download-md" class="quiet-button" type="button">Download report (.md)</button>
+            <button id="insurance-report-download-email" class="quiet-button" type="button">Download email draft (.txt)</button>
+          </div>
+        </section>
+
+        <section class="incident-strip" data-route="overview">
+          <div><span class="eyebrow">Affected asset</span><strong id="asset-id">—</strong></div>
+          <div><span class="eyebrow">Assessment window</span><strong id="assessment-window">—</strong></div>
+          <div><span class="eyebrow">Reference</span><strong id="reference-id">—</strong></div>
+          <div class="review-status"><span class="eyebrow">Review status</span><strong id="review-label">—</strong></div>
+        </section>
+
+        <section class="hero-grid" data-route="overview">
+          <article class="hero-estimate panel">
+            <div class="panel-heading"><span class="eyebrow">Estimated lost energy</span><span class="record-id">ASSESSMENT OUTPUT</span></div>
+            <div class="hero-number"><span id="lost-kwh">—</span><span class="unit">kWh</span></div>
+            <p id="hero-kwh-range" class="muted hero-range">—</p>
+            <p id="hero-window-caveat" class="hero-window-caveat"></p>
+            <div class="hero-status"><span class="status-dot-inline"></span><strong id="hero-review-state">—</strong></div>
+            <div class="hero-rule"></div>
+            <div class="hero-foot"><span>Model <strong id="model-name">—</strong></span><span>Window <strong id="window-duration">—</strong></span></div>
+          </article>
+          <article class="trust-panel panel">
+            <div class="panel-heading"><span class="eyebrow">Trust &amp; review gates</span><span id="gate-count" class="gate-count">—</span></div>
+            <div id="trust-gates" class="gate-list"></div>
+            <div class="next-action">
+              <span class="eyebrow">Next action</span>
+              <p id="next-action">—</p>
+              <p class="checklist-heading">Before acting on this estimate</p>
+              <ol class="checklist-list">
+                <li>Confirm the outage cause independently — this tool estimates lost production, not why the gap happened.</li>
+                <li>Confirm the target and reference turbine identities match your own records.</li>
+                <li>Review the self-validation spread on the Why to trust it page (T1/T2/T3 range) before relying on the point estimate.</li>
+                <li>Treat this as provisional evidence, not a final settlement figure.</li>
+              </ol>
+            </div>
+          </article>
+        </section>
+
+        <section class="loss-chart-panel panel" data-route="overview">
+          <div class="panel-heading"><div><span class="eyebrow">Energy loss</span><h2>Where the lost energy built up over the outage</h2></div></div>
+          <div id="loss-chart-wrap" class="chart-wrap loss-chart-wrap"><div class="loading">Loading series…</div></div>
+          <div id="loss-chart-tooltip" class="chart-tooltip" role="status" aria-live="polite"></div>
+          <div class="chart-foot"><span id="loss-chart-range">—</span><span>Cumulative kWh, left axis; shaded area is the running loss.</span></div>
+          <p class="plain-note loss-chart-intro">Running total of estimated lost energy, climbing to the <strong id="loss-chart-total">—</strong> kWh headline figure. The minute-to-minute shape is illustrative (weighted by how low the wind was at each moment); the total matches the calculated prediction.</p>
+        </section>
+
+        <section id="analysis" class="analysis-heading" data-route="analysis">
+          <span class="eyebrow">BayWa challenge-data prediction</span>
+          <h2>What the model estimates during the gap</h2>
+        </section>
+
+        <section class="chart-panel panel" data-route="analysis">
+          <div class="panel-heading"><div><span class="eyebrow">Assessment signal</span><h2>Reconstructed wind during the evidence gap</h2></div><div class="chart-controls"><span class="chart-horizon-note">Reference chosen from full pre-outage history</span><button id="truth-toggle" class="chart-toggle" type="button" aria-pressed="false">Show validation overlay</button></div></div>
+          <div class="chart-legend"><span><i class="legend-line reconstructed"></i>Reconstructed wind</span><span class="truth-legend"><i class="legend-line truth"></i>Actual recorded wind <em>for checking accuracy only</em></span><span id="band-legend"><i class="legend-band"></i>90% confidence range</span></div>
+          <div id="chart-wrap" class="chart-wrap"><div class="loading">Loading series…</div></div>
+          <div id="chart-tooltip" class="chart-tooltip" role="status" aria-live="polite"></div>
+          <div class="chart-foot"><span id="chart-range">—</span><span id="chart-note">The actual recorded wind is hidden by default — it exists only to check accuracy in this simulated back-test.</span></div>
+        </section>
+
+        <section class="analysis-narrative" data-route="analysis">
+          <p id="analysis-narrative-text">—</p>
+        </section>
+
+        <details class="detail-disclosure panel" data-route="analysis">
+          <summary>More detail on this result</summary>
+          <div class="detail-disclosure-body">
+            <section id="baywa-targets" class="tiers-panel panel">
+              <div class="section-heading"><div><span class="eyebrow">BayWa challenge-data prediction</span><h2>All three real targets: T1, T2, T3</h2></div></div>
+              <p class="small-note">T1, T2 and T3 are the three target turbines BayWa asked us to reconstruct. O1, O2 and H1–H5 are the other real turbines in the same dataset, used as reference candidates — there is no farm-location registry for this dataset, so the reference pool is ranked purely on how well each one's past readings matched the target.</p>
+              <p id="baywa-targets-intro" class="small-note">—</p>
+              <div id="baywa-targets-grid" class="tiers-grid"></div>
+              <p id="baywa-targets-outlier" class="small-note"></p>
+              <p id="baywa-targets-hidden-caveat" class="small-note"></p>
+              <p id="baywa-targets-proxy-caveat" class="small-note"></p>
+            </section>
+
+            <div class="window-group">
+              <h3 class="window-group-heading">Hidden-window prediction <span class="window-group-tag">the graded record</span></h3>
+              <section class="three-column">
+                <article class="panel compact-panel">
+                  <div class="panel-heading"><span class="eyebrow">Reference &amp; domain check</span></div>
+                  <div class="metric-row"><span>Selected reference</span><strong id="reference-detail">—</strong></div>
+                  <div class="metric-row"><span>Prediction window points</span><strong id="hidden-window-points">—</strong></div>
+                  <div class="metric-row"><span>Tested wind-speed range</span><strong id="domain-status">—</strong></div>
+                  <div class="metric-row"><span>Reference &amp; target alignment</span><strong id="alignment-status">—</strong></div>
+                  <p class="small-note">This checks wind-speed range only — not power-curve behavior, seasonality, or cross-farm transfer.</p>
+                </article>
+                <article class="panel compact-panel">
+                  <div class="panel-heading"><span class="eyebrow">Uncertainty status</span></div>
+                  <div class="big-inline"><strong id="coverage-value">—</strong><span>of true values fell inside our predicted range</span></div>
+                  <div class="metric-row"><span>Target</span><strong id="target-coverage">—</strong></div>
+                  <div class="metric-row"><span>Average range width</span><strong id="interval-width">—</strong></div>
+                  <p id="uncertainty-note" class="small-note">—</p>
+                </article>
+              </section>
+            </div>
+
+            <div class="window-group">
+              <h3 class="window-group-heading">Separate self-validation <span class="window-group-tag">shown window, 04–10 Sept — used only to gauge method accuracy</span></h3>
+              <section class="three-column">
+                <article class="panel compact-panel">
+                  <div class="panel-heading"><span class="eyebrow">Shown-window self-validation</span></div>
+                  <div class="big-inline"><strong id="error-value">—</strong><span>energy error (WAPE)</span></div>
+                  <div class="metric-row"><span>Training-history points compared</span><strong id="paired-count">—</strong></div>
+                  <div class="metric-row"><span>Wind-speed error (RMSE)</span><strong id="wind-rmse">—</strong></div>
+                  <div class="metric-row"><span>Wind signed bias</span><strong id="wind-bias">—</strong></div>
+                  <div class="metric-row"><span id="hidden-kwh-label">Actual value</span><strong id="hidden-kwh">—</strong></div>
+                </article>
+              </section>
+            </div>
+          </div>
+        </details>
+
+        <details class="detail-disclosure panel" data-route="analysis">
+          <summary>Testing on other wind farms (not the real BayWa result)</summary>
+          <div class="detail-disclosure-body">
+            <section id="evidence-tiers" class="tiers-panel panel">
+              <div class="section-heading"><div><span class="eyebrow">Validated scope</span><h2>Three tiers of evidence, three different questions</h2></div><span class="method-version">NOT ONE CONFLATED NUMBER</span></div>
+              <div id="tiers-grid" class="tiers-grid"></div>
+              <div id="tiers-scale" class="tiers-scale"></div>
+              <p id="tiers-footnote" class="small-note tiers-footnote">&mdash;</p>
+            </section>
+
+            <section id="other-findings" class="tiers-panel panel">
+              <div class="section-heading"><div><span class="eyebrow">Additional findings</span><h2>Simple-baseline and reference-weighting results</h2></div><span class="method-version">FOLLOW-UP TESTS</span></div>
+              <div id="other-findings-grid" class="tiers-grid"></div>
+            </section>
+          </div>
+        </details>
+
+        <section class="commercial-panel panel" data-route="overview">
+          <div class="section-heading"><div><span class="eyebrow">Indicative commercial impact</span><h2>Translate the energy loss into an estimated financial impact</h2></div></div>
+          <div class="commercial-grid">
+            <div><span class="eyebrow">Scenario profile</span><strong id="commercial-profile-name">—</strong><p id="commercial-profile-note" class="small-note">—</p></div>
+            <label><span class="eyebrow">Scenario price / MWh</span><input id="commercial-price" type="number" min="0" step="0.01" /></label>
+            <div class="commercial-result"><span class="eyebrow">Estimated financial impact</span><strong id="commercial-value">—</strong><p id="commercial-range" class="small-note">—</p><span id="commercial-disclaimer">Indicative only, using a manually entered demo price — not a settlement, contractual, or legal value.</span></div>
+          </div>
+          <div class="commercial-foot"><span id="commercial-source">—</span><button id="recalculate-commercial" class="quiet-button">Recalculate</button></div>
+        </section>
+
+        <section id="method" class="method-section panel" data-route="method">
+          <div class="section-heading"><div><span class="eyebrow">Method &amp; limitations</span><h2>How to read this estimate</h2></div><span class="method-version" id="method-version">—</span></div>
+          <div class="method-divider"><span>Full methodology and limitations</span></div>
+          <div class="method-grid-2col">
+            <div><span class="eyebrow">Reconstruction</span><p id="method-reconstruction">—</p><p class="method-formula">v<sub>target</sub>(t) ≈ a + b · v<sub>reference</sub>(t) — b is set so the predicted wind matches the target's own variance (std(target) / std(reference), signed by their correlation), not ordinary least-squares; a is fit from the pre-outage overlap so the line passes through both turbines' average readings. Plain least-squares regression under-predicts energy once pushed through a power curve; matching variance instead avoids that.</p></div>
+            <div><span class="eyebrow">Energy calculation</span><p id="method-energy">—</p><p class="method-formula">Lost energy = Σ P(v<sub>target</sub>(t)) · Δt — P(·) is the target turbine's own pre-outage power curve, Δt is the reading interval (10 minutes for BayWa).</p></div>
+          </div>
+          <div class="method-grid-full"><span class="eyebrow">Limitations</span><ul id="limitations"></ul></div>
+          <div class="method-divider"><span>Other methods we considered</span></div>
+          <div class="method-grid-full considered-box">
+            <ul class="plain-list considered-list">
+              <li><b>Direct power regression</b> (reference turbine's power output → target's power output directly) — excluded for the real BayWa submission because no BayWa source file contains a power column; it remains a same-farm comparison method in the external validation above.</li>
+              <li><b>Naive averaging of other turbines in the uploaded dataset</b> (no wind reconstruction, no fitting) — competitive at same-farm distance, but loses clearly once turbines are genuinely far apart (see "Additional findings" above), so it is not the shipped method.</li>
+              <li><b>Multi-turbine blend</b> (averaging several reference turbines instead of one) — ties or slightly underperforms a single well-chosen reference at real cross-farm distance; kept as a documented alternative, not shipped as the default.</li>
+            </ul>
+            <p class="small-note">Wind-first single-reference reconstruction is what shipped because it is the only method tested that stays reasonable both at same-farm and at real cross-farm distance.</p>
+          </div>
+          <div class="method-divider"><span>What we'd build next</span></div>
+          <div class="method-grid-full">
+            <ul class="plain-list">
+              <li>A calibrated uncertainty interval for the real BayWa pipeline, once enough held-out BayWa data exists to build one; this record's gate is marked "not evaluated" until then.</li>
+              <li>Automatic outage-cause classification, so you don't have to separately confirm whether a gap was a sensor fault or a real mechanical outage before trusting the estimate.</li>
+              <li>Support for a genuine neighbouring-farm scenario once two real, nearby, overlapping farms are available to test against (today's nearest proxy is ~399 km apart).</li>
+            </ul>
+          </div>
+        </section>
+        <section id="upload" class="upload-panel panel" data-route="upload">
+          <div class="section-heading"><div><span class="eyebrow">Run it yourself</span><h2>Select your files, get a reconstruction right away</h2></div></div>
+          <p class="plain-note">Select your target turbine's file (the one with the data gap), a reference turbine's file, and — optionally — a power-curve file. Drop them all into the one box below together; we automatically sort out which file is which and show you what we detected before you run anything.</p>
+          <p class="plain-note">No files on hand? <a href="/sample/T2_data.xlsx" download>T2 (target)</a>, <a href="/sample/O1_data.xlsx" download>O1 (reference)</a>, <a href="/sample/T2_power_curve.xlsx" download>T2's power curve</a> — download all three, then select all three together in the one box below.</p>
+          <p class="plain-note">This runs a live, separate calculation on whatever you upload — it does not change the official T3 record shown on the Result and Why to trust it pages.</p>
+          <details class="upload-format-details"><summary>File format details</summary>
+            <p class="plain-note">Wind-data columns are either <code>timestamp_utc,turbine_id,wind_speed_ms</code> (canonical) or <code>timestamp,turbine_name,wind_speed</code> (BayWa raw); power-curve columns are <code>wind_speed,power</code> or <code>bin_center_ms,mean_power_kw</code>.</p>
+          </details>
+          <form id="upload-form" class="upload-form">
+            <label>All files together (required — select 2 or more)<input type="file" id="upload-files" name="files" accept=".csv,.xlsx,.xls" multiple required></label>
+            <div id="upload-selection-summary" class="upload-selection-summary" hidden></div>
+            <label>Manual outage-window start (optional)<input type="text" id="upload-manual-start" name="manual_start" placeholder="e.g. 2026-09-01T00:00:00Z"></label>
+            <label>Manual outage-window end (optional)<input type="text" id="upload-manual-end" name="manual_end" placeholder="e.g. 2026-09-04T00:00:00Z"><p class="upload-hint">Leave both blank to auto-detect from the file's own gap.</p></label>
+            <button type="submit" class="upload-submit">Run reconstruction</button>
+          </form>
+          <div id="upload-result" class="upload-result" hidden></div>
+        </section>
+
+      </main>
+    </div>
+    <script src="./assessment-data.js"></script>
+    <script src="./evidence-tiers-data.js"></script>
+    <script src="./app.js?v=20261023d"></script>
+  </body>
+</html>

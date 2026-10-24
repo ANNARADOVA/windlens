@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://windlens.local/schemas/commercial-profile.v1.json",
+  "title": "WindLens commercial pricing profile",
+  "description": "User-supplied inputs for indicative revenue-impact calculations. This schema does not determine contractual settlement, Redispatch eligibility, or legal liability.",
+  "type": "object",
+  "required": ["profile_id", "display_name", "currency", "settlement_interval_minutes", "price_basis", "source"],
+  "properties": {
+    "profile_id": {"type": "string", "minLength": 1},
+    "display_name": {"type": "string", "minLength": 1},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "settlement_interval_minutes": {"type": "integer", "enum": [5, 10, 15, 30, 60]},
+    "price_basis": {"type": "string", "enum": ["fixed", "time_series"]},
+    "fixed_price_eur_per_mwh": {"type": "number", "minimum": 0},
+    "price_series": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["timestamp_utc", "price_per_mwh"],
+        "properties": {
+          "timestamp_utc": {"type": "string", "format": "date-time"},
+          "price_per_mwh": {"type": "number"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "effective_from_utc": {"type": "string", "format": "date-time"},
+    "effective_to_utc": {"type": "string", "format": "date-time"},
+    "negative_price_rule": {"type": "string"},
+    "curtailment_exclusion": {"type": "string"},
+    "source": {"type": "string", "minLength": 1},
+    "notes": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"price_basis": {"const": "fixed"}}}, "then": {"required": ["fixed_price_eur_per_mwh"]}},
+    {"if": {"properties": {"price_basis": {"const": "time_series"}}}, "then": {"required": ["price_series"]}}
+  ],
+  "additionalProperties": false
+}

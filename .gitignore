@@ -1,0 +1,27 @@
+# Proprietary BayWa r.e. challenge data -- not ours to publish
+data_hackathon_baywa_re*/
+data_hackathon_baywa_re*.zip
+
+# Large local proxy-validation datasets (Kelmarsh/Hill of Towie/Penmanshiel, ~4.5GB)
+data/
+
+# OS / editor cruft
+.DS_Store
+.Rhistory
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# Unrelated local agent-tooling state (claude-flow / swarm / ruvector), not project files
+.claude-flow/
+.swarm/
+agentdb.rvf*
+ruvector.db
+.claude/
+
+# Personal / scratch
+Screenshots for Anna/
