@@ -3646,3 +3646,261 @@ confirmation summary's client-side rendering logic (`renderUploadSelectionSummar
 in `app.js`) was verified by code review plus the server-side `/preview`
 response it consumes being independently confirmed correct, not by a live
 file-select-and-watch-it-render pass.
+
+---
+
+**2026-10-24 (latest+8): IA rebuild -- two pages instead of four, from Anna's
+hand-sketched wireframe. DECISION.**
+
+**The sketch.** Page 1, "Result": upload control up top, prominent; on submit
+the form collapses and the result renders in the same place, same page; a
+chart with the target's own line and the selected reference overlaid, outage
+window visibly shaded; headline kWh, accumulated-energy chart, wind RMSE/MAE,
+power deviation, financial summary, link down to the full report. Default
+landing state (before any upload) still shows the live BayWa T3 headline
+record -- the graded submission must be visible without an upload action.
+Page 2, "Methodology": merges the old Analysis (validation) + How-it-works
+(method) + report actions into one page, framed as "play around with the
+behavioural analysis." Keeps the editable price and live-recalculating
+estimate, the wind-first/reference-selection/uncertainty narrative.
+
+**A real correctness gap, not just copy (fixed at the source).** Anna's margin
+note: if the best-ranked reference turbine doesn't actually have data covering
+the target's outage window, don't silently predict from it -- fall back to the
+next-best reference that does, and say so. Checked: `select_reference_turbine()`
+(`reconstruct.py`) ranked candidates purely by pre-outage holdout R², with zero
+check on whether the top pick has any readings during the window actually being
+reconstructed -- a candidate could be the best historical fit and still be
+itself down (or simply never uploaded) for the exact window needed, silently
+producing an empty/degenerate reconstruction with no coverage (the existing
+`reference_coverage_pct` field would have shown 0%, but nothing would have
+substituted a working reference). Fixed by extending the function with optional
+`full_df`/`window_start`/`window_end` kwargs (backward-compatible, default
+`None`): when given, the top-ranked candidate with zero coverage in the window
+is skipped in favor of the next-best-ranked candidate that does have coverage,
+surfaced via a new `reference_fallback_note` string (never silent). Wired into
+BOTH callers that matter: `run_baywa_assessment.py` (the official T1/T2/T3
+record generator -- confirmed no fallback triggers there; O1/O2 fully cover
+the hidden window as expected) and `upload_tool.py::run_pipeline` (the live
+upload path, where a user's own files are far more likely to have gaps). Two
+new tests in `test_reconstruct.py` cover the fallback firing and staying
+silent when unneeded.
+
+**The overlay chart needed new data the committed `assessment-data.js` didn't
+have.** The existing `series.points` field only carries the hidden window's
+432 *reconstructed* values -- no raw target/reference readings, no pre/post-gap
+context. Built a one-off script (not committed, run from scratch via the venv
+python) pulling T3's and O1's real readings from `data/derived/baywa_canonical.csv`
+across Aug 29 - Sept 7 (3 days before/after the hidden window), hourly-
+downsampled to 216 points, with an `in_outage` flag per point. Inserted as a
+new `overlay_series` top-level field via the same safe
+`json.loads`/`assert`/`json.dumps` pattern used throughout this project for
+hand-edited data files -- never a blind overwrite. Also added
+`validation.power_rmse_kw`/`power_mae_kw`/`power_signed_bias_kw` (pulled from
+`data/derived/baywa_assessment_result.json`'s existing shown-window power-error
+numbers, which were computed but never surfaced in the committed JS) so the
+Result page's "power deviation" stat has a real number, not a placeholder. For
+live uploads, `upload_tool.py` gained an equivalent `_overlay_series()` that
+builds the same shape directly from the uploaded `wind_df` (margin = outage
+duration either side, capped to ~400 points) -- no extra files needed, since
+the full history is already in memory.
+
+**Unifying the Result view.** `buildResultViewModel(source, data)` in `app.js`
+normalizes either the official assessment object or one `/run` target entry
+into one small shape (target/reference ids, window, lost kWh, wind/power
+error -- `null` with an honest "not applicable" reason where a live upload
+has no ground truth), and `renderResultView(vm)` is the only thing that
+touches that part of the DOM. Uploading a file now replaces the SAME view in
+place (hides the form, shows a "Show the live BayWa record again" reset
+button) rather than opening a separate, visually lesser result area below a
+form -- directly satisfying Anna's "should feel like it replaces/updates that
+same view" note. The financial-impact summary on Page 1 is read-only and
+mirrors whatever price is set on the Methodology page's (unchanged) editable
+input, via a shared `refreshFinancialSummary()`.
+
+**"Send an email": scoped down per the coordinator's answer to Anna's
+question.** No SMTP, no server-side send (credentials risk this close to
+deadline, and unnecessary). The existing `email_draft` (already generated
+server-side by `insurance_report.py`, already returned by `/insurance-report`)
+is now wired into a real `mailto:` link -- `mailto:?subject=...&body=...`,
+built client-side by splitting the draft's leading `Subject: ...` line from
+its body -- so clicking it opens the user's own mail client with the draft
+prefilled, ready for them to review and send themselves. Replaces the old
+"download .txt" behaviour for that action entirely (not kept alongside it --
+Anna's brief named exactly two report actions for this page, PDF and email).
+
+**Evidence-tiers cut down, not deleted.** Anna: "we will remove analysis on
+the other data sets in full... mention those in other ideas we considered
+under methodology and show some small results there, but not extensive info."
+The full Kelmarsh/Penmanshiel/Hill-of-Towie tier grid/scale/footnote no longer
+renders in the jury-facing demo; replaced with one paragraph plus one summary
+stat under "Other validation approaches we considered" on the Methodology
+page (`renderOtherApproachesSummary()`). `evidence-tiers-data.js` and the
+scripts that produced it are untouched -- this only stops surfacing the
+extensive version, per Anna's own framing.
+
+**Trust gates relocated, not dropped.** The detailed pass/fail/not-evaluated
+gate list (with the Round 2 amber "not evaluated" styling, contrast-checked)
+is not named in Anna's sketch for either page; rather than deleting carefully-
+tuned existing content, it was moved to Methodology under "Why to trust this
+record" -- consistent with that page's framing and with the standing
+instruction to flag rather than silently override anything already verified
+working. Flagging this relocation here as the one place this round made an
+interpretive call beyond the literal sketch.
+
+**Verification:** 189/189 tests pass (3 new: the reference-coverage fallback
+firing, the no-fallback-needed case, and the upload overlay-series shape/gap
+assertions). `node --check workspace/app.js` clean. All three check scripts
+clean (`check_demo_copy.py` caught one instance of literal "the demo" in new
+copy, fixed). Dev server restarted and a real browser session driven against
+it: zero console errors on fresh loads of both `#overview` and `#method`
+(after forcing a hard reload -- the data files have no cache-busting query
+string by default and the browser was serving a stale cached copy across the
+hash-only navigation during verification, caught and fixed by bumping their
+query strings); the official T3 record renders correctly (112,411 kWh,
+overlay chart showing T3's real gap against O1's continuous line with the
+outage window shaded, loss chart, EUR 9,555 at the default price); the price
+input on Methodology live-updates Page 1's read-only financial summary; the
+insurance-report `mailto:` link was generated and its decoded subject/body
+inspected directly (correct, no duplicated "Subject:" line in the body). A
+real end-to-end live-upload pass was run IN THE BROWSER (not just curl) by
+fetching the three sample files client-side and POSTing to `/run` exactly as
+the real upload form does, then calling the same `renderResultView()`/
+`buildResultViewModel()` code path the form itself calls: T2 target, O1
+reference, 100% coverage, in-domain, 10-minute cadence, 432-point overlay
+series with the gap and shading rendering correctly, "YOUR LIVE RUN" tag
+displayed, honest "not applicable" wind/power error, and the reset button
+correctly restoring the official record afterward. The one gap unchanged from
+prior rounds: this session's browser tools still cannot drive the native
+`<input type=file>` picker itself, so the actual drag-and-drop/file-dialog
+interaction was not driven end-to-end -- everything downstream of file
+selection (the fetch, the server round-trip, and the client-side rendering)
+was.
+
+---
+
+**2026-10-24 (latest+9): IA-rebuild follow-up round -- further copy trim,
+README rewrite, a second real correctness gap, multi-target Result UI.
+DECISION.**
+
+**1. "Other validation approaches" cut further, per Anna's exact words.**
+Her own framing: "we can totally remove analysis done for the other external
+data sets... I would only include mention for those that we considered it...
+but to future opportunities." The paragraph from the prior round (still
+quoting "6.8% WAPE, Kelmarsh KWF1") was still result-shaped. Removed entirely
+as a standalone section; folded into the existing "What we'd build next" list
+as one forward-looking bullet, no numbers, no tier language: public-farm
+validation at a range of distances, and a turbine-location registry's effect
+on reference selection, both named as open directions "not part of this
+submission's evidence." `renderOtherApproachesSummary()` and its DOM target
+removed from `app.js`/`index.html` since nothing renders there now;
+`evidence-tiers-data.js`'s own `<script>` tag also dropped from `index.html`
+(nothing in `app.js` reads `window.WINDLENS_EVIDENCE_TIERS` any more) --
+the underlying data file and the scripts that generated it are untouched on
+disk, just no longer loaded into the live page, which is the literal
+reading of "don't surface the extensive version."
+
+**2. Root `README.md` was not a trim job -- it predated the real BayWa data
+arriving and needed a rewrite.** On inspection: every section (scope note,
+"what it does," the WAPE/coverage tables, "honest limitations") described the
+Kelmarsh/Hill-of-Towie same-farm-proxy study from before the real BayWa
+challenge data arrived -- 19 separate mentions of those two farms, zero
+mentions of T1/T2/T3 or the real submission anywhere in the file. Not what a
+reader opening the repo on GitHub should see first. Rewrote it to center the
+real submission: the real hidden-window prediction (T3, 112,411 kWh, O1
+reference, no ground truth by construction) and the real shown-window
+self-validation numbers (T3 5.19%, T2 2.73%, T1 39.36% outlier) up front,
+followed by an updated "What it does" (matching the real pipeline, including
+the 2026-10-24 reference-coverage-fallback fix), updated "Honest limitations"
+(rewritten for the real-data caveats: no ground truth for the hidden window
+by construction, pure behavioral reference selection with no geography
+registry, proxy "truth" power, no calibrated uncertainty yet), one
+"Future opportunities" section (the same brief, non-numeric framing as the
+Methodology page bullet above -- Kelmarsh/Penmanshiel/Hill-of-Towie mentioned
+once, pointing to `docs/DECISION_LOG.md`/`docs/METHOD_BAKEOFF_2026-10-23.md`/
+`docs/REDTEAM_2026-10-23_adversarial_review.md` for full history without
+featuring them), and an updated repository-layout/running-it-locally section
+reflecting the two-page Result/Methodology workspace. The docs/ files
+themselves are untouched, just no longer the README's main content.
+
+**3. A second real correctness gap, this time in how a whole-farm-down
+upload applies power curves.** Anna asked how the upload tool handles several
+turbines going down at once, and whether it's annoying (one at a time).
+Checked: `run_pipeline()` already loops over every auto-detected target in
+one combined upload -- that part was already right, already least-touch-point
+(drop every file together, auto-classified). But `baywa_tool_server.py` did
+`power_curve_df = load_power_curve(*power_curve_items[0])` -- only the FIRST
+uploaded power-curve file, applied to every target. BayWa ships one power
+curve per turbine (`T1_power_curve.xlsx`, `T2_power_curve.xlsx`, etc.); a
+real whole-farm-down upload with each target's own curve would have silently
+applied turbine 1's curve to every other target too -- wrong kWh for every
+target after the first, no error, no warning. Fixed with
+`_find_power_curve_for_target()` in `upload_tool.py`: matches an uploaded
+power-curve filename to a target turbine by the same word-boundary-safe
+pattern as the turbine id (e.g. `T2_power_curve.xlsx` -> T2), resolved
+separately for EACH target inside `run_pipeline`'s loop via a new
+`power_curve_items` parameter (the existing single-DataFrame `power_curve_df`
+parameter stays for simple single-curve callers, including the existing unit
+tests, so nothing there needed to change). A target with no matching curve
+among what was uploaded gets an explicit, per-target
+`estimated_lost_kwh_unavailable_reason` ("No power curve uploaded for T1 --
+showing wind-speed reconstruction only") -- never a silent substitution of
+someone else's curve. `baywa_tool_server.py` now passes the raw
+`power_curve_items` list through to `run_pipeline` instead of pre-loading
+just the first file; its now-unused `load_power_curve` import was removed.
+Two new tests in `test_upload_tool.py` (`RunPipelineMultiTargetPowerCurveTests`)
+cover both the correct-curve-per-target case (two targets, two curves with
+deliberately different flat kW values so a swap would be caught) and the
+named-reason-no-fallback case.
+
+**Verified against the real files, not just synthetic fixtures:** curl'd
+`/run` with T1+T3's real data, O1+O2 as references, and both T1's and T3's
+real power curves together in one upload -- T1 came back at 118,373 kWh and
+T3 at 112,411 kWh, matching the official per-target hidden-window figures
+exactly (T3 identical to the graded record; T1 matching the comparison
+figure already shown on the Methodology page), confirming no cross-target
+curve mixing.
+
+**4. Multi-target Result UI, agreed design with Anna.** When `/run` returns
+2+ targets, a single-target-shaped result page doesn't scale (stacking N
+overlay charts, or silently showing only one). Built: a summary row per
+returned target renders immediately with zero clicks (turbine id, its own
+outage window, headline kWh or its unavailable-reason), with the existing
+single-target detail view (hero, overlay chart, loss chart, financial
+summary) switched underneath by clicking a row -- explicitly NOT one shared
+chart across targets' potentially non-overlapping windows, which would
+compress or mislead, matching Anna's own call on this. Single-target uploads
+(the common case) render exactly as before: the summary section stays
+`hidden`, detail renders directly. Implemented as
+`renderUploadTargetsSummary()` in `app.js`, reusing the existing
+`buildResultViewModel()`/`renderResultView()` pair per-row on click; the
+"Show the live BayWa record again" reset button also hides the summary.
+Live-verified in-browser with the real T1+T3 two-target upload above: both
+summary rows render with correct per-target kWh, clicking the inactive row
+switches the detail view to that target (confirmed via `asset-id`/`lost-kwh`
+changing and the `active` class moving), and the reset button correctly
+hides the summary and restores the single-target official view.
+
+**Also this round (smaller, same honesty standard):** the upload form gained
+explicit "what to upload" requirements copy (every broken turbine's own
+file, at least one reference file, and that turbine's own power-curve file
+for a financial figure) and an honest, undeferred-limitation note that
+auto-detection only finds a turbine's single longest gap -- a second,
+separate outage on the same turbine needs the manual-window fields run a
+second time; this is staying as a known limitation for this submission, not
+silently unstated.
+
+**Verification:** 191/191 tests pass (2 new beyond the prior round's 189:
+per-target power-curve matching, and the no-match-named-reason case).
+`node --check workspace/app.js` clean. All three check scripts clean. Live-
+verified in a FRESH browser tab (not a reused one with stale console history)
+against the restarted server: zero console errors on both `#overview` and
+`#method`. The real multi-target `/run` test above required temporarily
+adding T1/T3's files and their power curves to the server's sample-file
+whitelist (`SAMPLE_FILES` in `baywa_tool_server.py`) so the in-browser
+`fetch()` could reach them the same way a real upload form would -- reverted
+immediately after verification, confirmed reverted by a 404 on
+`/sample/T1_data.xlsx` and a clean server restart before reporting back. Same
+file-picker limitation as every prior round: the actual click-to-select step
+was not driven; the fetch-and-render path downstream of it was, using the
+real server's real response to real files.

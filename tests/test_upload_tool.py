@@ -158,6 +158,76 @@ class RunPipelineCadenceTests(unittest.TestCase):
 
         self.assertIn("not validated against ground truth", target_entry["raw_reconstruction_notice"])
 
+    def test_result_includes_overlay_series_spanning_before_during_and_after_the_gap(self) -> None:
+        # 2026-10-24 (IA rebuild): the Result chart needs the target's own actual
+        # readings (with its real gap) and the reference's actual readings
+        # overlaid, across a window wider than just the outage itself, so the
+        # gap and the reference's continuity through it are both visible.
+        df = _synthetic_wind_df(gap=True)
+        result = run_pipeline(df, power_curve_df=None)
+        target_entry = next(t for t in result["targets"] if t["target_turbine"] == "TARGET")
+
+        overlay = target_entry["overlay_series"]
+        self.assertGreater(len(overlay), 5)
+        in_outage_points = [p for p in overlay if p["in_outage"]]
+        self.assertTrue(in_outage_points)
+        self.assertTrue(all(p["target_ms"] is None for p in in_outage_points))
+        self.assertTrue(any(p["reference_ms"] is not None for p in in_outage_points))
+        outside_points = [p for p in overlay if not p["in_outage"]]
+        self.assertTrue(any(p["target_ms"] is not None for p in outside_points))
+
+
+class RunPipelineMultiTargetPowerCurveTests(unittest.TestCase):
+    def _two_target_wind_df(self) -> pd.DataFrame:
+        rows = []
+        for i in range(30):
+            ts = (pd.Timestamp("2026-01-01T00:00:00Z") + pd.Timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # 20 hours of paired pre-outage history (select_reference_turbine requires
+            # >=10), then a 4-hour outage, matching on both targets so O1 is the only
+            # candidate reference for either (each target excludes the other, which is
+            # itself a detected target, from its own candidate pool).
+            v = 6.0 + (i % 5) * 0.3
+            missing = 20 <= i < 24
+            rows.append((ts, "T1", None if missing else v))
+            rows.append((ts, "T2", None if missing else v))
+            rows.append((ts, "O1", v))
+        return pd.DataFrame(rows, columns=["timestamp_utc", "turbine_id", "wind_speed_ms"])
+
+    def test_each_target_gets_its_own_matched_power_curve_not_the_first_uploaded(self) -> None:
+        # 2026-10-24 correctness fix: a whole-farm-down upload (several targets,
+        # each shipped with its own power curve -- exactly how BayWa names them)
+        # must match each target to ITS OWN curve by filename, never silently
+        # apply whichever curve happened to be uploaded first to every target.
+        wind_df = self._two_target_wind_df()
+        power_curve_items = [
+            (b"wind_speed,power\n0,100\n50,100\n", "T1_power_curve.csv"),
+            (b"wind_speed,power\n0,300\n50,300\n", "T2_power_curve.csv"),
+        ]
+
+        result = run_pipeline(wind_df, power_curve_items=power_curve_items)
+        by_target = {t["target_turbine"]: t for t in result["targets"]}
+        self.assertIn("T1", by_target)
+        self.assertIn("T2", by_target)
+
+        # 4 missing hourly readings: T1's own curve (100 kW flat) = 400 kWh;
+        # T2's own curve (300 kW flat) = 1200 kWh. If T2 had wrongly been given
+        # T1's curve (the old bug), it would also read 400 kWh.
+        self.assertAlmostEqual(by_target["T1"]["estimated_lost_kwh"], 400.0, places=1)
+        self.assertAlmostEqual(by_target["T2"]["estimated_lost_kwh"], 1200.0, places=1)
+
+    def test_a_target_with_no_matching_curve_gets_a_named_unavailable_reason_not_someone_elses_curve(self) -> None:
+        wind_df = self._two_target_wind_df()
+        # Only T1 ships a power curve in this upload; T2 does not.
+        power_curve_items = [(b"wind_speed,power\n0,100\n50,100\n", "T1_power_curve.csv")]
+
+        result = run_pipeline(wind_df, power_curve_items=power_curve_items)
+        by_target = {t["target_turbine"]: t for t in result["targets"]}
+
+        self.assertAlmostEqual(by_target["T1"]["estimated_lost_kwh"], 400.0, places=1)
+        self.assertNotIn("estimated_lost_kwh", by_target["T2"])
+        self.assertIn("T2", by_target["T2"]["estimated_lost_kwh_unavailable_reason"])
+        self.assertIn("No power curve uploaded", by_target["T2"]["estimated_lost_kwh_unavailable_reason"])
+
 
 class DescribeUploadedFilesTests(unittest.TestCase):
     def test_distinguishes_target_from_reference_from_power_curve(self) -> None:

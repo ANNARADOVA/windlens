@@ -34,7 +34,6 @@ from windlens.insurance_report import generate as generate_insurance_report
 from windlens.upload_tool import (
     classify_file_kind,
     describe_uploaded_files,
-    load_power_curve,
     load_wind_data_files,
     run_pipeline,
 )
@@ -210,9 +209,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             wind_df = load_wind_data_files(wind_data_items)
-            power_curve_df = None
-            if power_curve_items:
-                power_curve_df = load_power_curve(*power_curve_items[0])
 
             def _text_field(name: str) -> str | None:
                 field_list = parts.get(name)
@@ -223,7 +219,15 @@ class Handler(BaseHTTPRequestHandler):
             manual_start = _text_field("manual_start")
             manual_end = _text_field("manual_end")
 
-            result = run_pipeline(wind_df, power_curve_df, manual_start, manual_end)
+            result = run_pipeline(
+                wind_df,
+                manual_start=manual_start,
+                manual_end=manual_end,
+                # One power-curve file per target, matched by filename (2026-10-24
+                # correctness fix) -- never just the first uploaded curve applied to
+                # every target in a whole-farm-down upload.
+                power_curve_items=power_curve_items,
+            )
         except Exception as exc:  # local tool: surface the error to the caller, not a 500 page
             traceback.print_exc()
             self._send_json_error(400, f"{type(exc).__name__}: {exc}")

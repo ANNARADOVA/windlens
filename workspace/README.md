@@ -13,10 +13,13 @@ PYTHONPATH=src /Users/annaradova/.venv/bin/python3 -m windlens.run_crossfarm_sho
 PYTHONPATH=src /Users/annaradova/.venv/bin/python3 -m windlens.build_evidence_tiers_data
 ```
 
-To view the whole workspace, including the "Upload & run" tab (drop a file, get a
-live reconstruction), run the one local tool server from the repository root. This
-needs pandas and numpy, which a plain system `python3` usually does not have --
-use the project's venv interpreter, the same one used above:
+The workspace is two pages: **Result** (`#overview` -- the live BayWa T3 record by
+default, with an upload form at the top that replaces the view with your own live
+run) and **Methodology** (`#method` -- validation detail, the editable price, and
+the report actions). To use the upload form, run the one local tool server from
+the repository root. This needs pandas and numpy, which a plain system `python3`
+usually does not have -- use the project's venv interpreter, the same one used
+above:
 
 ```bash
 PYTHONPATH=src /Users/annaradova/.venv/bin/python3 -m windlens.baywa_tool_server
@@ -29,12 +32,12 @@ being used.)
 Then open <http://127.0.0.1:8765/#overview>. This one process serves the static
 workspace files and the `/run` upload endpoint together.
 
-If you only need Overview/Analysis/Methodology (no live upload), a plain static
-server also works:
+If you only need to read the Result and Methodology pages (no live upload), a
+plain static server also works:
 
 ```bash
 python3 -m http.server 8000
 ```
 
-Then open <http://localhost:8000/workspace/> -- the Upload tab will show an
+Then open <http://localhost:8000/workspace/> -- the upload form will show an
 error directing you to the command above instead.

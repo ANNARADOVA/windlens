@@ -1,6 +1,80 @@
 # WindLens handover
 
-**2026-10-24 (latest+12, read first): P2 round -- nav tabs relabeled to signal
+**2026-10-24 (latest+14, read first): Follow-up round on the IA rebuild --
+further-trimmed other-datasets mention, root README.md rewritten for the real
+submission, a second real correctness gap fixed (power curves in multi-target
+uploads), and multi-target Result UI built. In priority order from the
+coordinator: (1) the "Other validation approaches we considered" copy cut
+further per Anna's exact words -- no WAPE numbers, no tier-ceiling language,
+folded into "What we'd build next" as one forward-looking bullet (not a
+dedicated section); root `README.md` fully rewritten (it predated the real
+BayWa data arriving and was entirely about the Kelmarsh/Penmanshiel/Hill-of-
+Towie proxy-farm study, 19 mentions, with no mention of the real T1/T2/T3
+submission at all -- now centers the real submission, with proxy-farm work
+cut to one line under "Future opportunities"; `docs/` files referenced but not
+featured). (2) README test count and the two-page Result/Methodology structure
+updated. (3) A second real correctness gap, found by Anna asking how a whole-
+farm-down upload (several targets at once) handles power curves:
+`baywa_tool_server.py` was silently applying whichever power-curve file was
+uploaded FIRST to every target, regardless of which turbine it actually
+belonged to -- wrong kWh for every target after the first, no error. Fixed
+with `_find_power_curve_for_target()` in `upload_tool.py` (filename-pattern
+matching, e.g. `T2_power_curve.xlsx` -> T2), wired through `run_pipeline`'s
+new `power_curve_items` parameter; a target with no matching curve gets an
+explicit per-target `estimated_lost_kwh_unavailable_reason` ("No power curve
+uploaded for T1...") rather than someone else's curve. (4) Multi-target Result
+UI: a summary row per target renders immediately (turbine id, window, kWh or
+why not), with the existing single-target detail view below switched by
+clicking a row; single-target uploads are unaffected (summary stays hidden).
+Also added: explicit "what to upload" requirements copy on the upload form,
+and an honest note that auto-detection only finds a turbine's single longest
+gap (a known, undeferred limitation -- manual-window fields are the stated
+workaround for a second gap). 191/191 tests pass (2 more: per-target
+power-curve matching and its no-match-named-reason case), all three check
+scripts clean, live-verified in a fresh browser tab with zero console errors
+on both routes, plus a real end-to-end multi-target `/run` round-trip
+(T1+T3, their own O1/O2 references, their own power curves) confirming each
+target got its OWN curve (T1: 118,373 kWh: T3: 112,411 kWh -- matching the
+official record exactly, not swapped) and the summary-row click-to-switch
+behavior. Full story in `docs/DECISION_LOG.md`'s matching 2026-10-24
+"(latest+9)" entry.**
+
+**2026-10-24 (latest+13): IA rebuild -- two pages, not four. Result
+(`#overview`) now leads with the upload form, with the live BayWa T3 record
+shown by default below it (not an empty page); submitting a live run replaces
+that same view in place via a shared `buildResultViewModel()`/`renderResultView()`
+pair that normalizes either the official record or an uploaded target entry into
+one shape, so a live run is never a lesser, separate result area. The reference
+chart is new: target's own actual readings overlaid with the selected
+reference's, with the outage window shaded -- not the old reconstructed-vs-truth
+chart (that one moved to Methodology, unchanged, as the self-validation chart).
+A real correctness gap Anna flagged is fixed at its source
+(`reconstruct.py::select_reference_turbine`): the top-ranked reference by
+historical fit is no longer used blindly if it has zero readings during the
+actual outage window -- it now falls back to the next-best covered candidate
+and surfaces this plainly (`reference_fallback_note`), wired into both the
+official-record generator and the upload tool. Methodology (`#method`) merges
+the old Analysis + How-it-works + report-actions pages, framed as "play around
+with the behavioural analysis": the editable price (unchanged logic) now lives
+only here and live-updates Result's read-only financial summary too; the
+extensive Kelmarsh/Penmanshiel/Hill-of-Towie evidence-tiers section no longer
+renders in the jury-facing demo (condensed to one paragraph + one stat under
+"Other validation approaches we considered" -- underlying data/scripts
+untouched). "Send an email" is now a real `mailto:` link built from the
+existing server-side `email_draft` (opens the user's own mail client,
+prefilled; no SMTP, nothing sent from the server) -- replaces the old
+"download .txt" behaviour for that action. 189/189 tests pass (3 new: the
+reference-coverage fallback, its no-fallback-needed case, and the upload
+overlay-series shape), all three check scripts clean, verified live via a
+real browser session against the running server plus a real end-to-end
+`/run` round-trip against BayWa's own linked sample files (T2+O1+power
+curve): reference O1 selected, 100% coverage, in-domain, 10-min cadence,
+432-point overlay series with the gap and shading rendering correctly, and
+the unified result view correctly swapping into "YOUR LIVE RUN" mode and
+back. Full story in `docs/DECISION_LOG.md`'s matching 2026-10-24
+"(latest+8)" entry.**
+
+**2026-10-24 (latest+12): P2 round -- nav tabs relabeled to signal
 sequence (Result / Why to trust it / How it works / Run your own data), the
 Upload tool's result now carries the same evidence fields as the official
 record (reference coverage %, wind-speed domain check, inferred cadence, a
@@ -1152,13 +1226,16 @@ failure, work-order, or operator label.
 
 - `node --check workspace/app.js`
 - `PYTHONPATH=src /Users/annaradova/.venv/bin/python3 -m unittest discover -s tests -q`
-- Latest result (2026-10-24, after the P2 round -- see this file's
-  "(latest+12)" entry at the top): 186 tests, 186 pass.
+- Latest result (2026-10-24, after the IA-rebuild follow-up round -- see this
+  file's "(latest+14)" entry at the top): 191 tests, 191 pass.
   `openpyxl` is now installed, so the prior 10 Excel-connector failures
   (noted here as of 2026-10-23) no longer apply.
-- Browser route check passed for all three hash routes (not re-verified after
-  the 2026-10-21 data-only regeneration; the JS itself was unchanged and
-  still passes `node --check`).
+- Browser route check passed for both hash routes (the workspace is now two
+  pages, Result and Methodology, not four) -- a fresh browser tab against the
+  running server showed zero console errors on both, plus a real end-to-end
+  multi-target `/run` round-trip against BayWa's own real T1/T3 files (each
+  with its own power curve) rendered correctly, each target with its own
+  correct kWh figure (see the "(latest+14)" entry at the top for detail).
 
 ## Next work
 

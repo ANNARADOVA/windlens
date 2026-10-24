@@ -60,7 +60,14 @@ def run_for_target(
     canonical_df: pd.DataFrame, target_turbine: str, power_curve: pd.DataFrame
 ) -> dict[str, Any]:
     pre_outage = canonical_df[canonical_df["timestamp_utc"] < TEST_SET_WINDOW_START]
-    selection = select_reference_turbine(pre_outage, target_turbine, REFERENCE_TURBINE_IDS)
+    selection = select_reference_turbine(
+        pre_outage,
+        target_turbine,
+        REFERENCE_TURBINE_IDS,
+        full_df=canonical_df,
+        window_start=TEST_SET_WINDOW_START,
+        window_end=TEST_SET_WINDOW_END,
+    )
     selected_reference = selection["selected"]
 
     reconstruction = reconstruct_wind_speed(
@@ -103,6 +110,7 @@ def run_for_target(
         "method": "wind_first_single_reference",
         "selected_reference": selected_reference,
         "reference_ranking": selection["ranking"],
+        "reference_fallback_note": selection.get("reference_fallback_note"),
         "shown_window_utc": [SHOWN_WINDOW_START, SHOWN_WINDOW_END],
         "shown_window_self_validation": {
             "compared_observations": wind_errors["compared_observations"],

@@ -111,6 +111,76 @@ class SelectReferenceTurbineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             select_reference_turbine(df, "KWF1", ["KWF2"], min_paired_observations=10)
 
+    def test_falls_back_to_next_best_reference_when_top_pick_has_no_window_coverage(self) -> None:
+        # 2026-10-24 correctness fix: the top-ranked candidate by historical fit can
+        # still be a turbine that has no readings at all during the actual outage
+        # window (down itself, or simply never uploaded for that period) -- the
+        # selection must not silently hand back a reference with zero coverage
+        # there when a worse-but-covered candidate exists.
+        n = 60
+        pre_timestamps = _timestamps(n)
+        window_timestamps = _timestamps(5, start_minute=10 * n)
+        rng = np.random.default_rng(0)
+        target_wind = np.linspace(3.0, 10.0, n)
+        best_reference = target_wind + rng.normal(0, 0.05, n)  # best historical fit
+        worse_reference = target_wind + rng.normal(0, 5.0, n)  # worse fit, but covers the window
+
+        df = pd.concat(
+            [
+                pd.DataFrame({"timestamp_utc": pre_timestamps, "turbine_id": "KWF1", "wind_speed_ms": target_wind}),
+                pd.DataFrame({"timestamp_utc": pre_timestamps, "turbine_id": "KWF2", "wind_speed_ms": best_reference}),
+                pd.DataFrame({"timestamp_utc": pre_timestamps, "turbine_id": "KWF3", "wind_speed_ms": worse_reference}),
+                # KWF2 (the best historical fit) has NO readings at all during the
+                # outage window itself -- only KWF3 does.
+                pd.DataFrame({"timestamp_utc": window_timestamps, "turbine_id": "KWF3", "wind_speed_ms": [6.0] * 5}),
+            ],
+            ignore_index=True,
+        )
+
+        pre_outage = df[df["timestamp_utc"].isin(pre_timestamps)]
+        result = select_reference_turbine(
+            pre_outage,
+            "KWF1",
+            ["KWF2", "KWF3"],
+            full_df=df,
+            window_start=window_timestamps[0],
+            window_end="2099-01-01T00:00:00Z",
+        )
+
+        self.assertEqual([entry["turbine_id"] for entry in result["ranking"]], ["KWF2", "KWF3"])
+        self.assertEqual(result["selected"], "KWF3")
+        self.assertIn("KWF2", result["reference_fallback_note"])
+        self.assertIn("KWF3", result["reference_fallback_note"])
+
+    def test_no_fallback_note_when_top_pick_already_covers_the_window(self) -> None:
+        n = 60
+        timestamps = _timestamps(n)
+        window_timestamps = _timestamps(5, start_minute=10 * n)
+        rng = np.random.default_rng(0)
+        target_wind = np.linspace(3.0, 10.0, n)
+        good_reference = target_wind + rng.normal(0, 0.05, n)
+
+        df = pd.concat(
+            [
+                pd.DataFrame({"timestamp_utc": timestamps, "turbine_id": "KWF1", "wind_speed_ms": target_wind}),
+                pd.DataFrame({"timestamp_utc": timestamps, "turbine_id": "KWF2", "wind_speed_ms": good_reference}),
+                pd.DataFrame({"timestamp_utc": window_timestamps, "turbine_id": "KWF2", "wind_speed_ms": [6.0] * 5}),
+            ],
+            ignore_index=True,
+        )
+
+        result = select_reference_turbine(
+            df[df["timestamp_utc"].isin(timestamps)],
+            "KWF1",
+            ["KWF2"],
+            full_df=df,
+            window_start=window_timestamps[0],
+            window_end="2099-01-01T00:00:00Z",
+        )
+
+        self.assertEqual(result["selected"], "KWF2")
+        self.assertNotIn("reference_fallback_note", result)
+
 
 class ReconstructWindSpeedTests(unittest.TestCase):
     def test_predicts_using_only_pre_outage_fit_and_in_window_reference_data(self) -> None:

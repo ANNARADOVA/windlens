@@ -23,6 +23,7 @@ fallback, not a silent failure).
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 import pandas as pd
@@ -254,6 +255,73 @@ def describe_uploaded_files(
     return described
 
 
+# Cap on overlay-chart points returned per target so a long real-world upload
+# (BayWa's own sample files span ~3 months at 10-minute cadence) doesn't ship a
+# huge per-point payload to the browser; evenly stepping down to this count still
+# shows the gap and the reference's continuity through it clearly.
+MAX_OVERLAY_POINTS = 400
+
+
+def _overlay_series(
+    wind_df: pd.DataFrame, target_turbine: str, reference_turbine: str, window_start: str, window_end: str
+) -> list[dict[str, Any]]:
+    """Target's own actual readings (with its real gap) and the selected
+    reference's actual readings, over a window spanning as far before and
+    after the outage as the outage itself is long -- so the Result chart can
+    show the target's line, the reference overlaid, and the outage window
+    shaded, rather than only the predicted values during the gap."""
+
+    duration = pd.Timestamp(window_end) - pd.Timestamp(window_start)
+    margin_start = (pd.Timestamp(window_start) - duration).strftime("%Y-%m-%dT%H:%M:%SZ")
+    margin_end = (pd.Timestamp(window_end) + duration).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    sliced = wind_df[(wind_df["timestamp_utc"] >= margin_start) & (wind_df["timestamp_utc"] < margin_end)]
+    target = sliced[sliced["turbine_id"] == target_turbine].set_index("timestamp_utc")["wind_speed_ms"]
+    reference = sliced[sliced["turbine_id"] == reference_turbine].set_index("timestamp_utc")["wind_speed_ms"]
+    timestamps = sorted(set(target.index) | set(reference.index))
+    if len(timestamps) > MAX_OVERLAY_POINTS:
+        step = max(1, len(timestamps) // MAX_OVERLAY_POINTS)
+        timestamps = timestamps[::step]
+
+    points = []
+    for ts in timestamps:
+        t_val = target.get(ts)
+        r_val = reference.get(ts)
+        points.append(
+            {
+                "timestamp_utc": ts,
+                "target_ms": None if pd.isna(t_val) else float(t_val),
+                "reference_ms": None if pd.isna(r_val) else float(r_val),
+                "in_outage": bool(window_start <= ts < window_end),
+            }
+        )
+    return points
+
+
+def _find_power_curve_for_target(
+    target_turbine: str, power_curve_items: list[tuple[bytes, str]]
+) -> pd.DataFrame | None:
+    """Match an uploaded power-curve file to a target turbine by filename (e.g.
+    ``T2_power_curve.xlsx`` -> T2), the same filename-pattern idea BayWa's own
+    file naming already follows. Returns None if no uploaded power-curve
+    filename names this turbine.
+
+    2026-10-24 correctness fix: a whole-farm-down upload (several targets at
+    once, exactly BayWa's shape: one file per turbine) previously had every
+    target silently use whichever power-curve file happened to be uploaded
+    FIRST, regardless of which turbine it actually belonged to -- wrong kWh
+    numbers with no error, for every target after the first. Matching by
+    filename, with no match meaning "no curve for this target" rather than a
+    silent fallback to someone else's curve, closes that gap.
+    """
+
+    pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(target_turbine)}(?![A-Za-z0-9])", re.IGNORECASE)
+    for file_bytes, filename in power_curve_items:
+        if pattern.search(filename):
+            return load_power_curve(file_bytes, filename)
+    return None
+
+
 def _targets_missing_in_window(wind_df: pd.DataFrame, start: str, end: str) -> list[str]:
     """Every turbine with zero valid (non-NaN) wind_speed_ms readings inside
     [start, end) -- whether that's because the rows are missing entirely or
@@ -277,10 +345,18 @@ def run_pipeline(
     power_curve_df: pd.DataFrame | None = None,
     manual_start: str | None = None,
     manual_end: str | None = None,
+    power_curve_items: list[tuple[bytes, str]] | None = None,
 ) -> dict[str, Any]:
     """Run the reconstruction for every auto-detected target turbine (or, when
     ``manual_start``/``manual_end`` are given, for every turbine that has no reading
-    at all inside that window) and return per-target predictions."""
+    at all inside that window) and return per-target predictions.
+
+    ``power_curve_items``, when given (a whole-farm-down upload with one power-curve
+    file per target, matched by filename via ``_find_power_curve_for_target`` --
+    2026-10-24), takes priority over ``power_curve_df`` and is resolved separately
+    for EACH target rather than applying one curve to every target. ``power_curve_df``
+    alone remains for the simple single-target/single-curve case (used directly by
+    callers that already know there is exactly one curve for exactly one target)."""
 
     uploaded_turbines = wind_df["turbine_id"].nunique()
     if uploaded_turbines < 2:
@@ -327,7 +403,14 @@ def run_pipeline(
 
             candidates = _candidate_references(wind_df, target_turbine, targets)
             pre_window = wind_df[wind_df["timestamp_utc"] < window_start]
-            selection = select_reference_turbine(pre_window, target_turbine, candidates)
+            selection = select_reference_turbine(
+                pre_window,
+                target_turbine,
+                candidates,
+                full_df=wind_df,
+                window_start=window_start,
+                window_end=window_end,
+            )
             selected_reference = selection["selected"]
 
             reconstruction = reconstruct_wind_speed(
@@ -386,6 +469,8 @@ def run_pipeline(
             "reference_coverage_pct": reference_coverage_pct,
             "domain_check": domain_check,
             "inferred_cadence_minutes": inferred_cadence_minutes,
+            "reference_fallback_note": selection.get("reference_fallback_note"),
+            "overlay_series": _overlay_series(wind_df, target_turbine, selected_reference, window_start, window_end),
             "raw_reconstruction_notice": (
                 "This is a raw reconstruction from your uploaded data, not validated "
                 "against ground truth for this event -- the same evidence standard as "
@@ -400,9 +485,23 @@ def run_pipeline(
             ],
         }
 
-        if power_curve_df is not None and not reconstruction.empty:
+        # Resolve THIS target's own power curve -- when several targets are uploaded
+        # together (a whole-farm-down upload), each gets matched to its own curve by
+        # filename rather than all of them silently sharing whichever curve was
+        # uploaded first (2026-10-24 correctness fix; see _find_power_curve_for_target).
+        if power_curve_items:
+            target_power_curve_df = _find_power_curve_for_target(target_turbine, power_curve_items)
+            if target_power_curve_df is None:
+                entry["estimated_lost_kwh_unavailable_reason"] = (
+                    f"No power curve uploaded for {target_turbine} -- showing wind-speed "
+                    "reconstruction only."
+                )
+        else:
+            target_power_curve_df = power_curve_df
+
+        if target_power_curve_df is not None and not reconstruction.empty:
             predicted_power = apply_power_curve(
-                power_curve_df, reconstruction["wind_speed_ms_reconstructed"].to_numpy()
+                target_power_curve_df, reconstruction["wind_speed_ms_reconstructed"].to_numpy()
             )
             entry["estimated_power_kw"] = [float(value) for value in predicted_power]
             if interval_hours is not None:

@@ -98,21 +98,44 @@ def select_reference_turbine(
     target_turbine: str,
     candidate_turbines: list[str],
     min_paired_observations: int = 10,
+    full_df: pd.DataFrame | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
 ) -> dict[str, Any]:
-    """Rank candidate reference turbines by time-ordered holdout R^2 against the target."""
+    """Rank candidate reference turbines by time-ordered holdout R^2 against the target.
+
+    ``full_df``/``window_start``/``window_end`` (2026-10-24, correctness fix): the
+    historical-fit ranking above says nothing about whether the top-ranked candidate
+    actually HAS readings during the outage window itself -- a candidate can be the
+    best-correlated turbine historically and still be itself down (or simply absent
+    from the uploaded files) for the exact window being reconstructed, which would
+    silently produce an empty/degenerate reconstruction with no coverage. When these
+    three are given, the top-ranked candidate with zero valid readings in
+    [window_start, window_end) is skipped in favor of the next-best-ranked candidate
+    that does have coverage there, with the substitution surfaced in the result
+    (never a silent fallback) via ``reference_fallback_note``.
+    """
 
     ranking = []
+    check_coverage = full_df is not None and window_start is not None and window_end is not None
     for candidate in candidate_turbines:
         paired = _paired_series(pre_outage_df, target_turbine, candidate)
         if len(paired) < min_paired_observations:
             continue
-        ranking.append(
-            {
-                "turbine_id": candidate,
-                "holdout_r2": _time_ordered_holdout_r2(paired),
-                "paired_observations": len(paired),
-            }
-        )
+        entry = {
+            "turbine_id": candidate,
+            "holdout_r2": _time_ordered_holdout_r2(paired),
+            "paired_observations": len(paired),
+        }
+        if check_coverage:
+            entry["window_coverage_rows"] = int(
+                full_df[
+                    (full_df["turbine_id"] == candidate)
+                    & (full_df["timestamp_utc"] >= window_start)
+                    & (full_df["timestamp_utc"] < window_end)
+                ]["wind_speed_ms"].notna().sum()
+            )
+        ranking.append(entry)
 
     if not ranking:
         raise ValueError(
@@ -121,7 +144,28 @@ def select_reference_turbine(
         )
 
     ranking.sort(key=lambda entry: entry["holdout_r2"], reverse=True)
-    return {"ranking": ranking, "selected": ranking[0]["turbine_id"]}
+    selected = ranking[0]["turbine_id"]
+    result: dict[str, Any] = {"ranking": ranking, "selected": selected}
+
+    if check_coverage:
+        covered = [entry for entry in ranking if entry["window_coverage_rows"] > 0]
+        if covered and covered[0]["turbine_id"] != selected:
+            top = ranking[0]
+            selected = covered[0]["turbine_id"]
+            result["selected"] = selected
+            result["reference_fallback_note"] = (
+                f"{top['turbine_id']} was the top-ranked reference by historical fit, but has no "
+                f"readings inside this outage window -- using {selected} instead, the next-best "
+                "candidate that does have coverage here."
+            )
+        elif not covered:
+            result["reference_fallback_note"] = (
+                "None of the candidate reference turbines have any readings inside this outage "
+                f"window -- proceeding with {selected}, the best-ranked by historical fit, but its "
+                "reconstruction for this window will be empty."
+            )
+
+    return result
 
 
 def reconstruct_wind_speed(

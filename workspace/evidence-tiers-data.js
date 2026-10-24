@@ -78,7 +78,7 @@ window.WINDLENS_EVIDENCE_TIERS = {
      "14.2% WAPE; 70 of 96 events pass review. (For comparison, same-farm reference turbines on the same targets and grid, but a different set of events, scored 6.2%.)"
     ]
    ],
-   "framing": "real cross-farm backtest at ~399km separation (Kelmarsh, Northamptonshire vs. Penmanshiel, Scottish Borders) — a realistic-distance floor, using external data to validate the method on two other wind farms. The cross-asset test is the T1/T2/T3 BayWa record on the Result and Why to trust it pages, not this proxy.",
+   "framing": "real cross-farm backtest at ~399km separation (Kelmarsh, Northamptonshire vs. Penmanshiel, Scottish Borders) — a realistic-distance floor, using external data to validate the method on two other wind farms. The cross-asset test is the T1/T2/T3 BayWa record on the Methodology page, not this proxy.",
    "does_not_prove": "The real BayWa cross-asset case directly — this uses a different turbine model, hub height and terrain (see the T1/T2/T3 BayWa record for the real test).",
    "source": "data/derived/validation/kelmarsh_penmanshiel_crossfarm_backtest.json"
   }
@@ -186,5 +186,5 @@ window.WINDLENS_EVIDENCE_TIERS = {
    "label": "pre-BayWa proxy gap — see the real BayWa result instead"
   }
  },
- "footnote": "Three different questions, three numbers — never averaged or presented as one. Tier 2 is a ceiling and Tier 3 a floor, both using external Kelmarsh/Penmanshiel data to validate the method on other wind farms. The cross-asset test is the T1/T2/T3 record on the Result and Why to trust it pages. Block selection favours windy, fully-reporting periods in all three tiers."
+ "footnote": "Three different questions, three numbers — never averaged or presented as one. Tier 2 is a ceiling and Tier 3 a floor, both using external Kelmarsh/Penmanshiel data to validate the method on other wind farms. The cross-asset test is the T1/T2/T3 record on the Methodology page. Block selection favours windy, fully-reporting periods in all three tiers."
 };
