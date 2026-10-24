@@ -26,3 +26,7 @@ ruvector.db
 # Personal / scratch
 Screenshots for Anna/
 Index Ausgleichsenergiepreis*.csv
+WindLens_BayWa_Methodology.pptx
+WindLens_BayWa_Final_Story.pptx
+scripts/generate_windlens_baywa_pptx.js
+scripts/generate_final_windlens_presentation.py
